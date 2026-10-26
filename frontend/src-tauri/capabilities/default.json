@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "The window loads the local catalog UI over HTTP and does not use Tauri commands.",
+  "windows": ["main"],
+  "permissions": []
+}

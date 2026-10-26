@@ -1,4 +1,11 @@
-import { CatalogApi, type Facets, type Location, type LocationReport, type Miniature } from "./api";
+import {
+  CatalogApi,
+  type ApiSettings,
+  type Facets,
+  type Location,
+  type LocationReport,
+  type Miniature,
+} from "./api";
 
 const TOKEN_KEY = "mc.token";
 const COMBAT = ["melee", "ranged", "magic"];
@@ -45,6 +52,23 @@ app.innerHTML = `
       <h2>Storage</h2>
       <form id="location-form" class="row"></form>
       <div id="report"></div>
+    </section>
+    <section class="panel wide stack" id="desktop-panel" hidden>
+      <h2>Encounter generator</h2>
+      <p class="empty">This window is the catalog. The generator calls a separate HTTP port on this computer, and only while that API is turned on.</p>
+      <label class="block">Admin token</label>
+      <div class="secret" id="admin-token"></div>
+      <div class="row" style="margin-top:0.6rem">
+        <button id="copy-token" class="quiet" type="button">Copy token</button>
+      </div>
+      <form id="api-form" class="stack">
+        <label><input id="api-enabled" type="checkbox" /> Allow the encounter generator to connect</label>
+        <label class="block" for="api-bind">Listen address</label>
+        <input id="api-bind" type="text" spellcheck="false" autocomplete="off" />
+        <p id="api-warning" class="warn"></p>
+        <p id="api-status" class="empty"></p>
+        <div><button type="submit">Save API settings</button></div>
+      </form>
     </section>
     <section class="panel wide">
       <h2>API keys</h2>
@@ -496,8 +520,86 @@ must<HTMLFormElement>("#key-form").addEventListener("submit", (event) => {
     .catch((error: Error) => say(error.message));
 });
 
-if (token) {
-  void refresh().catch((error: Error) => say(error.message));
-} else {
-  say("Save a token to load the catalog. Use the admin token from MC_ADMIN_TOKEN.");
+must<HTMLButtonElement>("#copy-token").addEventListener("click", () => {
+  const value = must<HTMLElement>("#admin-token").textContent ?? "";
+  void navigator.clipboard.writeText(value).then(
+    () => say("Admin token copied."),
+    () => say("Could not copy automatically. Select the token and copy it."),
+  );
+});
+
+must<HTMLFormElement>("#api-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const enabled = must<HTMLInputElement>("#api-enabled").checked;
+  const bind = must<HTMLInputElement>("#api-bind").value.trim();
+  void api()
+    .updateSettings(enabled, bind)
+    .then((settings) => {
+      renderApiStatus(settings);
+      say(settings.listening ? "API is on." : "API is off.");
+    })
+    .catch((error: Error) => say(error.message));
+});
+
+must<HTMLInputElement>("#api-bind").addEventListener("input", () => {
+  showBindWarning(must<HTMLInputElement>("#api-bind").value.trim());
+});
+
+void boot();
+
+function loopback(bind: string): boolean {
+  const host = bind.startsWith("[")
+    ? bind.slice(1, bind.indexOf("]"))
+    : bind.slice(0, bind.lastIndexOf(":"));
+  return host === "127.0.0.1" || host === "::1";
+}
+
+function showBindWarning(bind: string): void {
+  must<HTMLParagraphElement>("#api-warning").textContent = loopback(bind)
+    ? ""
+    : "This address is not limited to this computer. Other machines that can reach it may try to connect.";
+}
+
+function renderApiStatus(settings: ApiSettings): void {
+  must<HTMLInputElement>("#api-enabled").checked = settings.api_enabled;
+  must<HTMLInputElement>("#api-bind").value = settings.api_bind;
+  showBindWarning(settings.api_bind);
+  const status = must<HTMLParagraphElement>("#api-status");
+  if (settings.listening && settings.bound) {
+    status.textContent = `API is listening on http://${settings.bound}`;
+  } else if (settings.api_enabled) {
+    status.textContent = "API is set to on, but nothing is listening yet.";
+  } else {
+    status.textContent = "API is off. The encounter generator cannot connect.";
+  }
+}
+
+async function loadApiSettings(): Promise<void> {
+  renderApiStatus(await api().settings());
+}
+
+async function boot(): Promise<void> {
+  const session = await fetch("/api/v1/desktop-session").then(
+    async (response) => (response.ok ? ((await response.json()) as { token?: string }) : null),
+    () => null,
+  );
+  if (session?.token) {
+    token = session.token;
+    localStorage.setItem(TOKEN_KEY, token);
+    must<HTMLFormElement>("#token-form").hidden = true;
+    must<HTMLElement>("#desktop-panel").hidden = false;
+    must<HTMLElement>("#admin-token").textContent = token;
+    try {
+      await refresh();
+      await loadApiSettings();
+    } catch (error) {
+      say(error instanceof Error ? error.message : "Could not load the catalog.");
+    }
+    return;
+  }
+  if (token) {
+    await refresh().catch((error: Error) => say(error.message));
+  } else {
+    say("Save a token to load the catalog.");
+  }
 }

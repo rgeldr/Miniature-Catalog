@@ -1,5 +1,6 @@
 use crate::auth::{self, Scope};
 use crate::db::{self, MiniFilter, NewLocation};
+use crate::desktop;
 use crate::error::ApiError;
 use crate::prep::{self, Need};
 use crate::state::AppState;
@@ -20,6 +21,17 @@ const OPENAPI: &str = include_str!("../openapi.yaml");
 const MAX_IMAGE: usize = 8 * 1024 * 1024;
 
 pub fn router(state: AppState, cors_origins: &[HeaderValue]) -> Router {
+    build(state, cors_origins, false)
+}
+
+/// Window listener. Same API as [`router`], plus the unauthenticated session
+/// route that hands the admin token to the desktop UI. Do not serve this on
+/// the encounter-generator port.
+pub fn ui_router(state: AppState) -> Router {
+    build(state, &[], true)
+}
+
+fn build(state: AppState, cors_origins: &[HeaderValue], include_session: bool) -> Router {
     let read = Router::new()
         .route("/api/v1/miniatures", get(list_miniatures))
         .route("/api/v1/miniatures/:id", get(get_miniature))
@@ -50,11 +62,19 @@ pub fn router(state: AppState, cors_origins: &[HeaderValue]) -> Router {
         .route("/api/v1/tags", post(create_tag))
         .route("/api/v1/api-keys", get(list_keys).post(create_key))
         .route("/api/v1/api-keys/:id", axum::routing::delete(revoke_key))
+        .route(
+            "/api/v1/settings",
+            axum::routing::get(get_settings).put(put_settings),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_admin));
 
     let mut app = Router::new()
         .route("/health", get(health))
-        .route("/openapi.yaml", get(openapi_doc))
+        .route("/openapi.yaml", get(openapi_doc));
+    if include_session {
+        app = app.route("/api/v1/desktop-session", get(desktop_session));
+    }
+    let mut app = app
         .merge(read)
         .merge(admin)
         .fallback(fallback)
@@ -659,6 +679,62 @@ async fn revoke_key(
     let conn = state.lock()?;
     db::revoke_api_key(&conn, id)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn desktop_session(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "token": state.admin_token }))
+}
+
+#[derive(Deserialize)]
+struct SettingsBody {
+    api_enabled: bool,
+    api_bind: String,
+}
+
+async fn get_settings(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(settings_view(&state).await?))
+}
+
+async fn put_settings(
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<SettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    let settings = desktop::Settings {
+        api_enabled: body.api_enabled,
+        api_bind: body.api_bind,
+    };
+    desktop::validate_api_bind(&settings.api_bind).map_err(ApiError::bad)?;
+    if let Some(host) = state.host.clone() {
+        let previous = desktop::load_settings(&state.data_dir).map_err(internal_message)?;
+        if let Err(err) = host.apply(state.clone(), &settings).await {
+            if previous.api_enabled {
+                let _ = host.apply(state.clone(), &previous).await;
+            }
+            return Err(ApiError::bad(err));
+        }
+    }
+    desktop::save_settings(&state.data_dir, &settings).map_err(internal_message)?;
+    Ok(Json(settings_view(&state).await?))
+}
+
+async fn settings_view(state: &AppState) -> Result<Value, ApiError> {
+    let settings = desktop::load_settings(&state.data_dir).map_err(internal_message)?;
+    let bound = match &state.host {
+        Some(host) => host.bound_addr().await.map(|addr| addr.to_string()),
+        None => None,
+    };
+    Ok(json!({
+        "api_enabled": settings.api_enabled,
+        "api_bind": settings.api_bind,
+        "listening": bound.is_some(),
+        "bound": bound,
+        "managed": state.host.is_some(),
+    }))
+}
+
+fn internal_message(err: String) -> ApiError {
+    eprintln!("settings error: {err}");
+    ApiError::internal()
 }
 
 struct JsonBody<T>(T);

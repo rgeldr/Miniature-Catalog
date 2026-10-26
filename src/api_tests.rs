@@ -1,4 +1,4 @@
-use crate::{router, AppState};
+use crate::{router, ui_router, AppState};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -411,4 +411,62 @@ async fn deleting_a_location_that_still_holds_miniatures_conflicts() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(body["error"].as_str().unwrap().contains("miniatures"));
+}
+
+#[tokio::test]
+async fn public_api_does_not_hand_out_the_desktop_token() {
+    let test = test_app(false);
+    let (status, _) = call(&test.app, None, "GET", "/api/v1/desktop-session", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let dir = tempfile::tempdir().unwrap();
+    let token = "test-admin-token-value";
+    let state = AppState::open(dir.path(), token, None).unwrap();
+    let app = ui_router(state);
+    let (status, body) = call(&app, None, "GET", "/api/v1/desktop-session", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["token"], token);
+}
+
+#[tokio::test]
+async fn settings_default_off_and_reject_a_hostname() {
+    let test = test_app(false);
+    let (status, _) = call(&test.app, None, "GET", "/api/v1/settings", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = call(
+        &test.app,
+        Some(&test.token),
+        "GET",
+        "/api/v1/settings",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["api_enabled"], false);
+    assert_eq!(body["api_bind"], "127.0.0.1:8080");
+    assert_eq!(body["listening"], false);
+    assert_eq!(body["managed"], false);
+
+    let (status, body) = call(
+        &test.app,
+        Some(&test.token),
+        "PUT",
+        "/api/v1/settings",
+        Some(r#"{"api_enabled":true,"api_bind":"localhost:8080"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("127.0.0.1"));
+
+    let (status, body) = call(
+        &test.app,
+        Some(&test.token),
+        "GET",
+        "/api/v1/settings",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["api_enabled"], false);
 }

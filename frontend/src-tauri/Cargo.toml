@@ -1,0 +1,19 @@
+[package]
+name = "miniature-catalog-desktop"
+version = "0.1.0"
+description = "Desktop window for the miniature catalog"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+miniature-catalog = { path = "../.." }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+url = "2"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

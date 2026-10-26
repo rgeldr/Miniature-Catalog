@@ -41,6 +41,14 @@ export type LocationReport = {
   total_quantity: number;
 };
 
+export type ApiSettings = {
+  api_enabled: boolean;
+  api_bind: string;
+  listening: boolean;
+  bound: string | null;
+  managed: boolean;
+};
+
 export type ApiKey = {
   id: number;
   name: string;
@@ -107,6 +115,17 @@ export class CatalogApi {
 
   keys(): Promise<{ api_keys: ApiKey[] }> {
     return this.request("GET", "/api/v1/api-keys");
+  }
+
+  settings(): Promise<ApiSettings> {
+    return this.request("GET", "/api/v1/settings");
+  }
+
+  updateSettings(apiEnabled: boolean, apiBind: string): Promise<ApiSettings> {
+    return this.request("PUT", "/api/v1/settings", {
+      api_enabled: apiEnabled,
+      api_bind: apiBind,
+    });
   }
 
   createKey(name: string, scope: string): Promise<ApiKey & { token: string }> {

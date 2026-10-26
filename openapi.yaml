@@ -7,11 +7,14 @@ info:
     Another application, such as an encounter generator, calls this API over the
     network. It does not link against this program.
 
-    Send `Authorization: Bearer <token>` on every `/api/v1` request.
+    Send `Authorization: Bearer <token>` on every `/api/v1` request except
+    `GET /api/v1/desktop-session`, which exists only on the desktop window's
+    localhost listener and is not served on the encounter-generator port.
     A token with scope `read` can list data and build a prep list.
-    A token with scope `admin` can also change the catalog and manage keys.
-    The `MC_ADMIN_TOKEN` environment variable is an admin token and is not stored
-    in the database.
+    A token with scope `admin` can also change the catalog, manage keys, and
+    turn the encounter-generator listener on or off.
+    The desktop app creates an admin token on first launch and shows it in the
+    window. `MC_ADMIN_TOKEN`, when set, overrides that token for the process.
 servers:
   - url: http://127.0.0.1:8080
     description: Local default
@@ -19,6 +22,7 @@ tags:
   - name: catalog
   - name: prep
   - name: keys
+  - name: settings
 paths:
   /health:
     get:
@@ -468,6 +472,77 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/v1/desktop-session:
+    get:
+      tags: [settings]
+      summary: Desktop window session
+      description: |
+        Served only by the desktop window listener on 127.0.0.1.
+        The encounter-generator port does not expose this route.
+        Returns the local admin token so the window can sign in without an
+        environment variable.
+      security: []
+      responses:
+        "200":
+          description: Admin token for this computer
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token:
+                    type: string
+  /api/v1/settings:
+    get:
+      tags: [settings]
+      summary: Read the encounter-generator listener settings
+      description: Requires an admin token.
+      responses:
+        "200":
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      tags: [settings]
+      summary: Turn the encounter-generator API on or off
+      description: |
+        Requires an admin token. `api_bind` is an IP and port, such as
+        `127.0.0.1:8080`. Host names are rejected. The desktop app applies the
+        change to a real TCP socket. The default is off, bound to localhost
+        when turned on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_enabled, api_bind]
+              properties:
+                api_enabled:
+                  type: boolean
+                api_bind:
+                  type: string
+                  example: 127.0.0.1:8080
+      responses:
+        "200":
+          description: Settings after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiSettings"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /api/v1/api-keys:
     get:
       tags: [keys]
@@ -912,6 +987,23 @@ components:
                 type: integer
               short:
                 type: integer
+    ApiSettings:
+      type: object
+      required: [api_enabled, api_bind, listening, managed]
+      properties:
+        api_enabled:
+          type: boolean
+        api_bind:
+          type: string
+          example: 127.0.0.1:8080
+        listening:
+          type: boolean
+        bound:
+          type: string
+          nullable: true
+        managed:
+          type: boolean
+          description: True when this process can start and stop the encounter-generator port.
     ApiKey:
       type: object
       required: [id, name, scope, created_at, revoked_at]

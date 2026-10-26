@@ -1,5 +1,6 @@
 use crate::auth;
 use crate::db;
+use crate::desktop::ApiHost;
 use crate::error::{ApiError, DbError};
 use crate::thumb;
 use rusqlite::Connection;
@@ -11,9 +12,14 @@ use std::time::Duration;
 pub struct AppState {
     db: Arc<Mutex<Connection>>,
     pub admin_hash: String,
+    /// Plaintext admin token. The desktop window shows it again; extra API keys stay hashed.
+    pub admin_token: String,
+    pub data_dir: PathBuf,
     pub thumbs_dir: PathBuf,
     pub static_dir: Option<PathBuf>,
     pub http: reqwest::Client,
+    /// Desktop process only. Headless `cargo run` leaves this empty and is itself the API.
+    pub host: Option<Arc<ApiHost>>,
 }
 
 impl AppState {
@@ -34,9 +40,12 @@ impl AppState {
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
             admin_hash: auth::hash_token(admin_token),
+            admin_token: admin_token.to_string(),
+            data_dir: data_dir.to_path_buf(),
             thumbs_dir,
             static_dir,
             http,
+            host: None,
         })
     }
 
