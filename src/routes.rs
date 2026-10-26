@@ -40,6 +40,7 @@ fn build(state: AppState, cors_origins: &[HeaderValue], include_session: bool) -
         .route("/api/v1/locations", get(list_locations))
         .route("/api/v1/reports/locations", get(location_report))
         .route("/api/v1/facets", get(facets))
+        .route("/api/v1/filters", get(list_filters))
         .route("/api/v1/prep", post(prep))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_read));
 
@@ -60,6 +61,10 @@ fn build(state: AppState, cors_origins: &[HeaderValue], include_session: bool) -
             axum::routing::put(update_location).delete(delete_location),
         )
         .route("/api/v1/tags", post(create_tag))
+        .route(
+            "/api/v1/filters",
+            post(add_filter).patch(rename_filter).delete(delete_filter),
+        )
         .route("/api/v1/api-keys", get(list_keys).post(create_key))
         .route("/api/v1/api-keys/:id", axum::routing::delete(revoke_key))
         .route(
@@ -88,7 +93,13 @@ fn build(state: AppState, cors_origins: &[HeaderValue], include_session: bool) -
     if !cors_origins.is_empty() {
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::list(cors_origins.to_vec()))
-            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+            ])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
         app = app.layer(cors);
     }
@@ -393,6 +404,64 @@ async fn create_tag(
     let conn = state.lock()?;
     let tag = db::create_tag(&conn, &body.category, &body.name)?;
     Ok((StatusCode::CREATED, Json(tag)))
+}
+
+async fn list_filters(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = state.lock()?;
+    Ok(Json(json!({ "groups": db::list_filters(&conn)? })))
+}
+
+#[derive(Deserialize)]
+struct FilterBody {
+    category: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    new_name: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    parent_id: Option<i64>,
+    #[serde(default)]
+    id: Option<i64>,
+}
+
+async fn add_filter(
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<FilterBody>,
+) -> Result<(StatusCode, Json<db::FilterEntry>), ApiError> {
+    let conn = state.lock()?;
+    let entry = db::add_filter(
+        &conn,
+        &body.category,
+        &body.name,
+        body.kind.as_deref(),
+        body.parent_id,
+    )?;
+    Ok((StatusCode::CREATED, Json(entry)))
+}
+
+async fn rename_filter(
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<FilterBody>,
+) -> Result<Json<db::FilterEntry>, ApiError> {
+    let new_name = body
+        .new_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| ApiError::bad("name is required"))?;
+    let conn = state.lock()?;
+    let entry = db::rename_filter(&conn, &body.category, &body.name, new_name, body.id)?;
+    Ok(Json(entry))
+}
+
+async fn delete_filter(
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<FilterBody>,
+) -> Result<StatusCode, ApiError> {
+    let conn = state.lock()?;
+    db::delete_filter(&conn, &body.category, &body.name, body.id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

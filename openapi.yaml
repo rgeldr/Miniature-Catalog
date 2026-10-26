@@ -400,6 +400,7 @@ paths:
     get:
       tags: [catalog]
       summary: Distinct filter values
+      description: Includes sizes and games saved as filter names even when no miniature uses them yet.
       responses:
         "200":
           description: Values currently in the catalog
@@ -409,6 +410,151 @@ paths:
                 $ref: "#/components/schemas/Facets"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/v1/filters:
+    get:
+      tags: [catalog]
+      summary: Filter names and how many miniatures use each one
+      description: |
+        Race, combat style, role, size, game, and location. A read token is enough.
+        Location rows include `id`, `parent_id`, `kind`, `path`, and `child_count`.
+        `used_by` for a location is the number of miniatures stored directly there.
+      responses:
+        "200":
+          description: One group per filter
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups]
+                properties:
+                  groups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FilterGroup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [catalog]
+      summary: Add a filter name
+      description: |
+        Requires an admin token. Race, role, and combat names are stored as tags.
+        Size and game names are stored even when unused. Location needs `name` and
+        `kind`, and may set `parent_id`. Adding a name that already exists is refused.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, name]
+              properties:
+                category:
+                  type: string
+                  enum: [race, combat, size, role, game, location]
+                name:
+                  type: string
+                kind:
+                  type: string
+                  description: Required for a location.
+                parent_id:
+                  type: integer
+                  nullable: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FilterEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    patch:
+      tags: [catalog]
+      summary: Rename a filter
+      description: |
+        Requires an admin token. Renaming updates every miniature that uses the old
+        value. Tags stay linked by id. Size and game text on miniatures is replaced.
+        A location rename keeps the same parent and kind, so child paths stay attached.
+        Renaming to a name that already exists is refused and changes nothing.
+        Location identifies the row with `id`. Other categories identify it with `name`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, new_name]
+              properties:
+                category:
+                  type: string
+                  enum: [race, combat, size, role, game, location]
+                name:
+                  type: string
+                  description: Current name. Required except for location.
+                new_name:
+                  type: string
+                id:
+                  type: integer
+                  description: Location id. Required when category is location.
+      responses:
+        "200":
+          description: Renamed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FilterEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [catalog]
+      summary: Delete an unused filter
+      description: |
+        Requires an admin token. Refused, and no data is removed, when miniatures
+        still use the value. The error includes that count. A location is also
+        refused when it still contains other locations. Deleting a location does
+        not detach miniatures from it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category]
+              properties:
+                category:
+                  type: string
+                  enum: [race, combat, size, role, game, location]
+                name:
+                  type: string
+                id:
+                  type: integer
+      responses:
+        "204":
+          description: Deleted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /api/v1/reports/locations:
     get:
       tags: [catalog]
@@ -818,6 +964,39 @@ components:
           enum: [race, role, combat]
         name:
           type: string
+    FilterEntry:
+      type: object
+      required: [name, used_by]
+      properties:
+        name:
+          type: string
+        used_by:
+          type: integer
+          description: Miniatures that still have this value. For a location, only those stored directly in it.
+        id:
+          type: integer
+        parent_id:
+          type: integer
+          nullable: true
+        kind:
+          type: string
+        path:
+          type: string
+        child_count:
+          type: integer
+    FilterGroup:
+      type: object
+      required: [category, label, entries]
+      properties:
+        category:
+          type: string
+          enum: [race, combat, size, role, game, location]
+        label:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/FilterEntry"
     Facets:
       type: object
       required: [races, roles, combat, sizes, games]

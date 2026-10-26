@@ -470,3 +470,419 @@ async fn settings_default_off_and_reject_a_hostname() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["api_enabled"], false);
 }
+
+fn group<'a>(body: &'a Value, category: &str) -> &'a Value {
+    body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["category"] == category)
+        .unwrap_or_else(|| panic!("missing {category}"))
+}
+
+fn named<'a>(body: &'a Value, category: &str, name: &str) -> Option<&'a Value> {
+    group(body, category)["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == name)
+}
+
+#[tokio::test]
+async fn filters_rename_updates_miniatures_and_refuses_an_existing_name() {
+    let test = test_app(true);
+    let (status, before) = call(&test.app, Some(&test.token), "GET", "/api/v1/filters", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(named(&before, "race", "orc").is_some());
+    let orc_users = named(&before, "race", "orc").unwrap()["used_by"]
+        .as_i64()
+        .unwrap();
+    assert!(orc_users >= 2);
+
+    let (status, conflict) = call(
+        &test.app,
+        Some(&test.token),
+        "PATCH",
+        "/api/v1/filters",
+        Some(r#"{"category":"race","name":"orc","new_name":"goblin"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let message = conflict["error"].as_str().unwrap();
+    assert!(message.contains("goblin"));
+    assert!(message.contains("not applied"));
+
+    let (status, same) = call(
+        &test.app,
+        Some(&test.token),
+        "PATCH",
+        "/api/v1/filters",
+        Some(r#"{"category":"race","name":"ORC","new_name":"orc"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(same["name"], "orc");
+
+    let (status, renamed) = call(
+        &test.app,
+        Some(&test.token),
+        "PATCH",
+        "/api/v1/filters",
+        Some(r#"{"category":"race","name":"orc","new_name":"beastfolk"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed["name"], "beastfolk");
+    assert_eq!(renamed["used_by"], orc_users);
+
+    let (status, listed) = call(
+        &test.app,
+        Some(&test.token),
+        "GET",
+        "/api/v1/miniatures",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let miniatures = listed["miniatures"].as_array().unwrap();
+    let renamed_minis = miniatures
+        .iter()
+        .filter(|mini| {
+            mini["races"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|race| race == "beastfolk")
+        })
+        .count();
+    assert_eq!(renamed_minis as i64, orc_users);
+    assert!(miniatures.iter().all(|mini| {
+        !mini["races"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|race| race == "orc")
+    }));
+    assert!(miniatures.iter().any(|mini| {
+        mini["races"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|race| race == "goblin")
+    }));
+
+    let (status, size_conflict) = call(
+        &test.app,
+        Some(&test.token),
+        "PATCH",
+        "/api/v1/filters",
+        Some(r#"{"category":"size","name":"28mm","new_name":"32mm"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(size_conflict["error"]
+        .as_str()
+        .unwrap()
+        .contains("not applied"));
+    let (status, sizes) = call(&test.app, Some(&test.token), "GET", "/api/v1/facets", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(sizes["sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|size| size == "28mm"));
+    assert!(sizes["sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|size| size == "32mm"));
+
+    let (status, spelled) = call(
+        &test.app,
+        Some(&test.token),
+        "PATCH",
+        "/api/v1/filters",
+        Some(r#"{"category":"size","name":"28mm","new_name":"28MM"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(spelled["name"], "28MM");
+    assert!(spelled["used_by"].as_i64().unwrap() >= 1);
+    let (status, listed) = call(
+        &test.app,
+        Some(&test.token),
+        "GET",
+        "/api/v1/miniatures?size=28MM",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        listed["miniatures"].as_array().unwrap().len() as i64,
+        spelled["used_by"].as_i64().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn filters_add_and_delete_block_when_miniatures_still_use_the_value() {
+    let test = test_app(true);
+    let (status, duplicate) = call(
+        &test.app,
+        Some(&test.token),
+        "POST",
+        "/api/v1/filters",
+        Some(r#"{"category":"race","name":"Goblin"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(duplicate["error"].as_str().unwrap().contains("goblin"));
+
+    let (status, added) = call(
+        &test.app,
+        Some(&test.token),
+        "POST",
+        "/api/v1/filters",
+        Some(r#"{"category":"size","name":"15mm"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(added["name"], "15mm");
+    assert_eq!(added["used_by"], 0);
+    let (status, facets) = call(&test.app, Some(&test.token), "GET", "/api/v1/facets", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(facets["sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|size| size == "15mm"));
+
+    let (status, _) = call(
+        &test.app,
+        Some(&test.token),
+        "DELETE",
+        "/api/v1/filters",
+        Some(r#"{"category":"size","name":"15mm"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, filters) =
+        call(&test.app, Some(&test.token), "GET", "/api/v1/filters", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(named(&filters, "size", "15mm").is_none());
+
+    let (status, blocked) = call(
+        &test.app,
+        Some(&test.token),
+        "DELETE",
+        "/api/v1/filters",
+        Some(r#"{"category":"size","name":"32mm"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let message = blocked["error"].as_str().unwrap();
+    assert!(message.contains("2"));
+    assert!(message.contains("Reassign"));
+    let (status, facets) = call(&test.app, Some(&test.token), "GET", "/api/v1/facets", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(facets["sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|size| size == "32mm"));
+    let (status, listed) = call(
+        &test.app,
+        Some(&test.token),
+        "GET",
+        "/api/v1/miniatures?size=32mm",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["miniatures"].as_array().unwrap().len(), 2);
+
+    let (status, game) = call(
+        &test.app,
+        Some(&test.token),
+        "POST",
+        "/api/v1/filters",
+        Some(r#"{"category":"game","name":"Frostgrave"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(game["used_by"], 0);
+    let (status, _) = call(
+        &test.app,
+        Some(&test.token),
+        "DELETE",
+        "/api/v1/filters",
+        Some(r#"{"category":"game","name":"Frostgrave"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn filters_location_rename_keeps_children_and_delete_does_not_orphan() {
+    let test = test_app(true);
+    let (status, filters) =
+        call(&test.app, Some(&test.token), "GET", "/api/v1/filters", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let garage = named(&filters, "location", "Garage").unwrap();
+    let garage_id = garage["id"].as_i64().unwrap();
+    let box2 = named(&filters, "location", "Box 2").unwrap();
+    let box_id = box2["id"].as_i64().unwrap();
+    assert!(box2["path"].as_str().unwrap().starts_with("Garage > "));
+    assert!(box2["used_by"].as_i64().unwrap() >= 1);
+
+    let (status, added) = call(
+        &test.app,
+        Some(&test.token),
+        "POST",
+        "/api/v1/filters",
+        Some(&format!(
+            r#"{{"category":"location","name":"Bin","kind":"box","parent_id":{garage_id}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(added["path"], "Garage > Bin");
+    assert_eq!(added["parent_id"], garage_id);
+    assert_eq!(added["used_by"], 0);
+    let bin_id = added["id"].as_i64().unwrap();
+
+    let (status, clash) = call(
+        &test.app,
+        Some(&test.token),
+        "POST",
+        "/api/v1/filters",
+        Some(&format!(
+            r#"{{"category":"location","name":"Bin","kind":"box","parent_id":{garage_id}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(clash["error"].as_str().unwrap().contains("Bin"));
+
+    let (status, renamed) = call(
+        &test.app,
+        Some(&test.token),
+        "PATCH",
+        "/api/v1/filters",
+        Some(&format!(
+            r#"{{"category":"location","id":{garage_id},"new_name":"Workshop"}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed["name"], "Workshop");
+    assert_eq!(renamed["id"], garage_id);
+
+    let (status, filters) =
+        call(&test.app, Some(&test.token), "GET", "/api/v1/filters", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        named(&filters, "location", "Bin").unwrap()["path"],
+        "Workshop > Bin"
+    );
+    assert_eq!(
+        named(&filters, "location", "Box 2").unwrap()["path"],
+        "Workshop > Cabinet A > Drawer 3 > Box 2"
+    );
+    let (status, listed) = call(
+        &test.app,
+        Some(&test.token),
+        "GET",
+        "/api/v1/miniatures",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listed["miniatures"].as_array().unwrap().iter().any(|mini| {
+        mini["location_id"] == box_id
+            && mini["location_path"] == "Workshop > Cabinet A > Drawer 3 > Box 2"
+    }));
+
+    let (status, blocked) = call(
+        &test.app,
+        Some(&test.token),
+        "DELETE",
+        "/api/v1/filters",
+        Some(&format!(r#"{{"category":"location","id":{garage_id}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(blocked["error"].as_str().unwrap().contains("inside"));
+    let (status, stored) = call(
+        &test.app,
+        Some(&test.token),
+        "DELETE",
+        "/api/v1/filters",
+        Some(&format!(r#"{{"category":"location","id":{box_id}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let stored_message = stored["error"].as_str().unwrap();
+    assert!(stored_message.contains("stored here"));
+    assert!(stored_message.contains(box2["used_by"].as_i64().unwrap().to_string().as_str()));
+
+    let (status, filters) =
+        call(&test.app, Some(&test.token), "GET", "/api/v1/filters", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(named(&filters, "location", "Workshop").is_some());
+    assert!(named(&filters, "location", "Box 2").is_some());
+    let (status, listed) = call(
+        &test.app,
+        Some(&test.token),
+        "GET",
+        &format!("/api/v1/miniatures?location_id={box_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!listed["miniatures"].as_array().unwrap().is_empty());
+
+    let (status, _) = call(
+        &test.app,
+        Some(&test.token),
+        "DELETE",
+        "/api/v1/filters",
+        Some(&format!(r#"{{"category":"location","id":{bin_id}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, filters) =
+        call(&test.app, Some(&test.token), "GET", "/api/v1/filters", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(named(&filters, "location", "Bin").is_none());
+    assert!(named(&filters, "location", "Box 2").is_some());
+}
+
+#[tokio::test]
+async fn read_token_can_list_filters_but_not_change_them() {
+    let test = test_app(true);
+    let (status, created) = call(
+        &test.app,
+        Some(&test.token),
+        "POST",
+        "/api/v1/api-keys",
+        Some(r#"{"name":"reader","scope":"read"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let read_token = created["token"].as_str().unwrap();
+
+    let (status, _) = call(&test.app, Some(read_token), "GET", "/api/v1/filters", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    for method in ["POST", "PATCH", "DELETE"] {
+        let (status, _) = call(
+            &test.app,
+            Some(read_token),
+            method,
+            "/api/v1/filters",
+            Some(r#"{"category":"size","name":"15mm","new_name":"54mm"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method}");
+    }
+}
