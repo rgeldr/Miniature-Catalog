@@ -131,6 +131,66 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
+.menubar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0.2rem 0.45rem;
+  background: var(--color-bg-header);
+  color: var(--color-text-header);
+}
+
+.menubar > button {
+  background: transparent;
+  color: var(--color-text-header);
+  border: 1px solid transparent;
+  border-radius: 0.35rem;
+  padding: 0.2rem 0.7rem;
+}
+
+.menubar > button:hover,
+.menubar > button[aria-expanded="true"] {
+  background: var(--color-bg-header-input);
+  border-color: var(--color-border-header-input);
+}
+
+.menubar > button:focus-visible {
+  outline-color: var(--color-text-header);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% - 0.15rem);
+  left: 0.45rem;
+  z-index: 30;
+  min-width: 14rem;
+  margin: 0;
+  padding: 0.3rem;
+  background: var(--color-bg-sidebar);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 0.6rem;
+  box-shadow: 0 0.6rem 1.4rem rgba(0, 0, 0, 0.22);
+}
+
+.menu[hidden] { display: none; }
+
+.menu button {
+  display: block;
+  width: 100%;
+  background: transparent;
+  color: var(--color-text);
+  border: 0;
+  border-radius: 0.4rem;
+  text-align: left;
+  padding: 0.45rem 0.65rem;
+}
+
+.menu button:hover,
+.menu button:focus-visible {
+  background: var(--color-bg-input);
+}
+
 header {
   display: flex;
   justify-content: space-between;
@@ -288,7 +348,39 @@ textarea { min-height: 4.5rem; resize: vertical; }
 }
 .card .actions { display: flex; gap: 0.35rem; margin-top: 0.45rem; }
 
-.wide { grid-column: 1 / -1; }
+dialog {
+  width: min(52rem, calc(100vw - 1.5rem));
+  max-height: calc(100dvh - 1.5rem);
+  margin: auto;
+  padding: 0.95rem 1rem 1.1rem;
+  color: var(--color-text);
+  background: var(--color-bg-sidebar);
+  border: 1px solid var(--color-border);
+  border-radius: 1rem;
+  overflow: auto;
+}
+
+dialog:not([open]) { display: none; }
+
+dialog::backdrop { background: rgba(20, 16, 12, 0.45); }
+
+.dialog-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.dialog-head h2 { margin: 0; }
+
+.dialog-head button { flex: 0 0 auto; }
+
+dialog h3 {
+  margin: 1rem 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+dialog .stack { margin-top: 0.35rem; }
 .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: end; }
 .row > * { flex: 1; min-width: 8rem; }
 .row button { flex: 0; }
@@ -317,6 +409,8 @@ th { color: var(--color-text-muted); font-weight: 600; }
 .warn { color: var(--color-warn); margin: 0.35rem 0; }
 
 @media (max-width: 800px) {
+  dialog { width: calc(100vw - 1rem); padding: 0.8rem; }
+  .dialog-head { align-items: flex-start; }
   header, .token, .header-actions { flex-direction: column; align-items: stretch; }
   .token input, header input { min-width: 0; }
   main { grid-template-columns: 1fr; padding: 0.8rem; }
