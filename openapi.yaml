@@ -1,0 +1,943 @@
+openapi: 3.0.3
+info:
+  title: Miniature Catalog API
+  version: 1.0.0
+  description: |
+    HTTP API for a self-hosted tabletop miniature catalog.
+    Another application, such as an encounter generator, calls this API over the
+    network. It does not link against this program.
+
+    Send `Authorization: Bearer <token>` on every `/api/v1` request.
+    A token with scope `read` can list data and build a prep list.
+    A token with scope `admin` can also change the catalog and manage keys.
+    The `MC_ADMIN_TOKEN` environment variable is an admin token and is not stored
+    in the database.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local default
+tags:
+  - name: catalog
+  - name: prep
+  - name: keys
+paths:
+  /health:
+    get:
+      summary: Liveness check
+      security: []
+      responses:
+        "200":
+          description: The process is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /openapi.yaml:
+    get:
+      summary: This document
+      security: []
+      responses:
+        "200":
+          description: OpenAPI document
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /api/v1/miniatures:
+    get:
+      tags: [catalog]
+      summary: List miniatures
+      description: |
+        Filters combine with AND across fields and OR inside a field.
+        `q` matches name words by case-insensitive prefix (`wiz` matches Wizard,
+        `orc` does not match Sorcerer). A location id includes everything stored
+        in that location and its descendants.
+      parameters:
+        - $ref: "#/components/parameters/q"
+        - $ref: "#/components/parameters/race"
+        - $ref: "#/components/parameters/role"
+        - $ref: "#/components/parameters/combat"
+        - $ref: "#/components/parameters/size"
+        - $ref: "#/components/parameters/game"
+        - $ref: "#/components/parameters/locationId"
+      responses:
+        "200":
+          description: Matching miniatures
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [miniatures]
+                properties:
+                  miniatures:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Miniature"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [catalog]
+      summary: Create a miniature
+      description: Requires an admin token. One row is one pile of identical miniatures in one location.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MiniatureInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Miniature"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/miniatures/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [catalog]
+      summary: Get one miniature
+      responses:
+        "200":
+          description: The miniature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Miniature"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [catalog]
+      summary: Replace a miniature
+      description: Requires an admin token. Replaces tags. Does not clear the thumbnail.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MiniatureInput"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Miniature"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [catalog]
+      summary: Delete a miniature
+      description: Requires an admin token. Deletes the thumbnail file as well.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/miniatures/{id}/thumbnail:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [catalog]
+      summary: Thumbnail image
+      responses:
+        "200":
+          description: JPEG thumbnail, at most 256 pixels on the long edge
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [catalog]
+      summary: Upload and downscale a thumbnail
+      description: |
+        Requires an admin token. Send the original as `image/jpeg`, `image/png`,
+        or `image/gif`, or as multipart field `file`. The server stores a JPEG
+        thumbnail and discards the original. Nothing is written into the database
+        except the file name.
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+          image/png:
+            schema:
+              type: string
+              format: binary
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Thumbnail stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThumbnailRef"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/miniatures/{id}/thumbnail/import:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [catalog]
+      summary: Import a thumbnail from Google Drive
+      description: |
+        Requires an admin token. `source` is a Drive file id or a
+        `drive.google.com` file link. The file must be shared as anyone with the
+        link. Google Photos links are rejected. The server downloads the file,
+        stores a JPEG thumbnail, and discards the original.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source:
+                  type: string
+                  example: https://drive.google.com/file/d/FILE_ID/view
+      responses:
+        "200":
+          description: Thumbnail stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThumbnailRef"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/locations:
+    get:
+      tags: [catalog]
+      summary: List storage locations
+      responses:
+        "200":
+          description: Locations with full paths
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [locations]
+                properties:
+                  locations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Location"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [catalog]
+      summary: Create a location
+      description: Requires an admin token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocationInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Location"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/locations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    put:
+      tags: [catalog]
+      summary: Replace a location
+      description: Requires an admin token. `parent_id` null moves it to the root.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocationInput"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Location"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [catalog]
+      summary: Delete an empty location
+      description: Requires an admin token. Fails when the location still contains locations or miniatures.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/tags:
+    get:
+      tags: [catalog]
+      summary: List tags
+      responses:
+        "200":
+          description: Race, role, and combat tags
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tags]
+                properties:
+                  tags:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Tag"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [catalog]
+      summary: Create a tag
+      description: Requires an admin token. Creating a miniature also creates missing tags.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, name]
+              properties:
+                category:
+                  type: string
+                  enum: [race, role, combat]
+                name:
+                  type: string
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/facets:
+    get:
+      tags: [catalog]
+      summary: Distinct filter values
+      responses:
+        "200":
+          description: Values currently in the catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Facets"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/reports/locations:
+    get:
+      tags: [catalog]
+      summary: How many miniatures are in each location
+      description: |
+        `direct_*` counts only miniatures whose location is exactly that row.
+        `total_*` includes descendants. Quantity is the sum of miniature quantities,
+        not the number of catalog rows.
+      responses:
+        "200":
+          description: One row per location
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [locations]
+                properties:
+                  locations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/LocationReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/prep:
+    post:
+      tags: [prep]
+      summary: Build a pull list for a game
+      description: |
+        A read token is enough. Each request is filled in order from matching
+        stock. Earlier requests keep what they take. Matches require every
+        supplied field (AND). Multiple values inside one field match if the
+        miniature has any of them (OR). Omitted fields are wildcards.
+
+        `groups` is sorted by location path so the figures can be pulled in one
+        walk per container. `shortages` lists requests that were not fully filled,
+        including requests with nothing available (`available` 0).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrepRequest"
+            example:
+              requests:
+                - label: front line
+                  races: [orc]
+                  combat: [melee]
+                  size: 28mm
+                  quantity: 6
+                - label: caster
+                  roles: [wizard, mage]
+                  quantity: 2
+      responses:
+        "200":
+          description: Pull list and any shortages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrepResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/api-keys:
+    get:
+      tags: [keys]
+      summary: List API keys
+      description: Requires an admin token. Tokens themselves are never returned.
+      responses:
+        "200":
+          description: Keys
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [api_keys]
+                properties:
+                  api_keys:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ApiKey"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [keys]
+      summary: Create an API key
+      description: Requires an admin token. The plaintext token is returned once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scope]
+              properties:
+                name:
+                  type: string
+                  example: encounter-generator
+                scope:
+                  type: string
+                  enum: [read, admin]
+      responses:
+        "201":
+          description: Created. Copy `token` now; it is not stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedApiKey"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/api-keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    delete:
+      tags: [keys]
+      summary: Revoke an API key
+      description: Requires an admin token. Revoking the environment admin token is not possible; change `MC_ADMIN_TOKEN` and restart.
+      responses:
+        "204":
+          description: Revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+    q:
+      name: q
+      in: query
+      schema:
+        type: string
+      description: Name words, comma not required. Prefix match per word.
+    race:
+      name: race
+      in: query
+      schema:
+        type: string
+      description: Comma-separated race tags. OR within, AND with other filters.
+    role:
+      name: role
+      in: query
+      schema:
+        type: string
+    combat:
+      name: combat
+      in: query
+      schema:
+        type: string
+    size:
+      name: size
+      in: query
+      schema:
+        type: string
+      description: Comma-separated sizes, for example `28mm,32mm`.
+    game:
+      name: game
+      in: query
+      schema:
+        type: string
+    locationId:
+      name: location_id
+      in: query
+      schema:
+        type: string
+      description: Comma-separated location ids. Each id includes descendants.
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or unknown token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Token does not have this scope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: No such record
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Conflicts with existing data
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    Miniature:
+      type: object
+      required:
+        - id
+        - name
+        - notes
+        - quantity
+        - size
+        - game
+        - location_id
+        - location_path
+        - races
+        - roles
+        - combat
+        - thumbnail_url
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        notes:
+          type: string
+        quantity:
+          type: integer
+        size:
+          type: string
+        game:
+          type: string
+          nullable: true
+        location_id:
+          type: integer
+        location_path:
+          type: string
+          example: Garage > Cabinet A > Drawer 3 > Box 2
+        races:
+          type: array
+          items:
+            type: string
+        roles:
+          type: array
+          items:
+            type: string
+        combat:
+          type: array
+          items:
+            type: string
+        thumbnail_url:
+          type: string
+          nullable: true
+    MiniatureInput:
+      type: object
+      required: [name, quantity, size, location_id]
+      properties:
+        name:
+          type: string
+        notes:
+          type: string
+        quantity:
+          type: integer
+          minimum: 0
+        size:
+          type: string
+        game:
+          type: string
+          nullable: true
+        location_id:
+          type: integer
+        races:
+          type: array
+          items:
+            type: string
+        roles:
+          type: array
+          items:
+            type: string
+        combat:
+          type: array
+          items:
+            type: string
+    Location:
+      type: object
+      required: [id, parent_id, name, kind, path]
+      properties:
+        id:
+          type: integer
+        parent_id:
+          type: integer
+          nullable: true
+        name:
+          type: string
+        kind:
+          type: string
+        path:
+          type: string
+    LocationInput:
+      type: object
+      required: [name, kind]
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          description: Free text. Common values are room, cabinet, drawer, box, container, tray, shelf.
+        parent_id:
+          type: integer
+          nullable: true
+    Tag:
+      type: object
+      required: [id, category, name]
+      properties:
+        id:
+          type: integer
+        category:
+          type: string
+          enum: [race, role, combat]
+        name:
+          type: string
+    Facets:
+      type: object
+      required: [races, roles, combat, sizes, games]
+      properties:
+        races:
+          type: array
+          items:
+            type: string
+        roles:
+          type: array
+          items:
+            type: string
+        combat:
+          type: array
+          items:
+            type: string
+        sizes:
+          type: array
+          items:
+            type: string
+        games:
+          type: array
+          items:
+            type: string
+    LocationReport:
+      type: object
+      required:
+        - id
+        - parent_id
+        - name
+        - kind
+        - path
+        - direct_entries
+        - direct_quantity
+        - total_entries
+        - total_quantity
+      properties:
+        id:
+          type: integer
+        parent_id:
+          type: integer
+          nullable: true
+        name:
+          type: string
+        kind:
+          type: string
+        path:
+          type: string
+        direct_entries:
+          type: integer
+        direct_quantity:
+          type: integer
+        total_entries:
+          type: integer
+        total_quantity:
+          type: integer
+    ThumbnailRef:
+      type: object
+      required: [thumbnail_url]
+      properties:
+        thumbnail_url:
+          type: string
+    PrepRequest:
+      type: object
+      required: [requests]
+      properties:
+        requests:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            required: [quantity]
+            properties:
+              label:
+                type: string
+              name:
+                type: string
+                nullable: true
+              races:
+                type: array
+                items:
+                  type: string
+              roles:
+                type: array
+                items:
+                  type: string
+              combat:
+                type: array
+                items:
+                  type: string
+              tags:
+                type: array
+                items:
+                  type: string
+                description: Matches a race, role, or combat tag.
+              size:
+                type: string
+                nullable: true
+              game:
+                type: string
+                nullable: true
+              quantity:
+                type: integer
+                minimum: 1
+    PrepResponse:
+      type: object
+      required: [groups, requests, shortages]
+      properties:
+        groups:
+          type: array
+          items:
+            type: object
+            required: [location_id, location_path, picks]
+            properties:
+              location_id:
+                type: integer
+              location_path:
+                type: string
+              picks:
+                type: array
+                items:
+                  type: object
+                  required: [request_index, label, miniature_id, name, quantity, size]
+                  properties:
+                    request_index:
+                      type: integer
+                    label:
+                      type: string
+                    miniature_id:
+                      type: integer
+                    name:
+                      type: string
+                    quantity:
+                      type: integer
+                    size:
+                      type: string
+        requests:
+          type: array
+          items:
+            type: object
+            required: [request_index, label, wanted, allocated, short]
+            properties:
+              request_index:
+                type: integer
+              label:
+                type: string
+              wanted:
+                type: integer
+              allocated:
+                type: integer
+              short:
+                type: integer
+        shortages:
+          type: array
+          items:
+            type: object
+            required: [request_index, label, wanted, available, short]
+            properties:
+              request_index:
+                type: integer
+              label:
+                type: string
+              wanted:
+                type: integer
+              available:
+                type: integer
+              short:
+                type: integer
+    ApiKey:
+      type: object
+      required: [id, name, scope, created_at, revoked_at]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        scope:
+          type: string
+        created_at:
+          type: string
+        revoked_at:
+          type: string
+          nullable: true
+    CreatedApiKey:
+      type: object
+      required: [id, name, scope, token]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        scope:
+          type: string
+        token:
+          type: string
+security:
+  - bearerAuth: []
