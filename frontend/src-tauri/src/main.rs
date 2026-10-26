@@ -78,6 +78,11 @@ fn resolve_static(app: &tauri::App) -> Result<PathBuf, String> {
         };
     }
     let mut candidates = Vec::new();
+    // Vite writes frontend/dist. While developing, that directory is newer than
+    // the copy Tauri places next to the debug binary, and `tauri dev` runs
+    // with src-tauri as the working directory.
+    candidates.push(PathBuf::from("../dist"));
+    candidates.push(PathBuf::from("frontend/dist"));
     if let Ok(resource) = app.path().resource_dir() {
         candidates.push(resource.join("dist"));
         candidates.push(resource);
@@ -87,9 +92,7 @@ fn resolve_static(app: &tauri::App) -> Result<PathBuf, String> {
             candidates.push(dir.join("dist"));
         }
     }
-    candidates.push(PathBuf::from("../dist"));
     candidates.push(PathBuf::from("dist"));
-    candidates.push(PathBuf::from("frontend/dist"));
     candidates
         .into_iter()
         .find(|path| path.join("index.html").is_file())

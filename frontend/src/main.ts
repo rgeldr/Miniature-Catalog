@@ -6,6 +6,9 @@ import {
   type LocationReport,
   type Miniature,
 } from "./api";
+import { applyTheme, currentTheme, readTheme } from "./theme";
+
+applyTheme(readTheme(), false);
 
 const TOKEN_KEY = "mc.token";
 const COMBAT = ["melee", "ranged", "magic"];
@@ -23,10 +26,13 @@ app.innerHTML = `
       <h1>Miniature Catalog</h1>
       <p>Where each figure is, and which box to open.</p>
     </div>
-    <form id="token-form" class="token">
-      <input id="token" type="password" placeholder="Admin or read token" autocomplete="current-password" />
-      <button type="submit">Save token</button>
-    </form>
+    <div class="header-actions">
+      <button id="theme-toggle" class="theme-toggle" type="button"></button>
+      <form id="token-form" class="token">
+        <input id="token" type="password" placeholder="Admin or read token" autocomplete="current-password" />
+        <button type="submit">Save token</button>
+      </form>
+    </div>
   </header>
   <div id="message"></div>
   <main>
@@ -79,6 +85,19 @@ app.innerHTML = `
     </section>
   </main>
 `;
+
+paintThemeToggle();
+must<HTMLButtonElement>("#theme-toggle").addEventListener("click", () => {
+  applyTheme(currentTheme() === "dark" ? "light" : "dark", true);
+  paintThemeToggle();
+});
+
+function paintThemeToggle(): void {
+  const button = must<HTMLButtonElement>("#theme-toggle");
+  const dark = currentTheme() === "dark";
+  button.textContent = dark ? "Light theme" : "Dark theme";
+  button.setAttribute("aria-pressed", dark ? "true" : "false");
+}
 
 const message = must<HTMLDivElement>("#message");
 const tokenInput = must<HTMLInputElement>("#token");
