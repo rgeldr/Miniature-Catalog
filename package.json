@@ -7,6 +7,6 @@
     "version:check": "node scripts/version.mjs check",
     "version:bump": "node scripts/version.mjs bump",
     "test": "node scripts/version.test.mjs",
-    "release": "npm --prefix frontend run tauri -- build && node scripts/make-latest-json.mjs"
+    "release": "npm --prefix frontend run tauri -- build"
   }
 }

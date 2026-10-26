@@ -31,7 +31,7 @@ cd D:\GitHub\Miniature-Catalog
 npm run release
 ```
 
-That checks the version and builds the desktop app. It then writes `latest.json` next to the NSIS installer, and stops if that signature file is missing. It does not create a git tag and it does not publish a GitHub release. See [Version and release](#version-and-release).
+That checks the version, then builds the desktop app. It does not create a git tag or a GitHub release. See [Version and release](#version-and-release).
 
 The Windows setup program is written under `frontend\src-tauri\target\release\bundle\nsis\`. An MSI is written under `bundle\msi\` when that bundler runs. `npm run tauri build` from `frontend` still builds those installers on its own.
 
@@ -107,25 +107,15 @@ npm test
 
 `npm run version:check` fails unless `YY.MM` is the current month. `npm run version:bump` adds one to `N` in the current month, or starts at `.1` when the month changes. `npm test` runs `scripts/version.test.mjs`. The same bump and check commands are `node scripts/version.mjs bump` and `node scripts/version.mjs check`.
 
-`26.10.1` is a valid semver. A January version written as `26.01.1` is not, because of the leading zero. That is the same rule 3D File Library uses. `npm run tauri build` runs `npm run version:check` before it compiles, so a stale month fails the build.
+`26.10.1` is a valid semver. A January version written as `26.01.1` is not, because of the leading zero. `npm run tauri build` runs `npm run version:check` before it compiles, so a stale month fails the build.
 
 ```powershell
 npm run release
 ```
 
-`npm run release` runs `npm run tauri build` in `frontend`, then `node scripts/make-latest-json.mjs`. The second step reads `Miniature Catalog_<version>_x64-setup.exe.sig` under `frontend\src-tauri\target\release\bundle\nsis\` and writes `latest.json` beside it. The signature is the whole `.sig` file. The download URL uses the version as the tag, with no `v` prefix. Spaces in the file name become dots in that URL, because GitHub does that to uploaded asset names.
+`npm run release` is the Tauri build, run from the repo root. The version check runs first, then the desktop app is built. It does not create a git tag, push, or publish a GitHub release. On Windows the installer is `frontend\src-tauri\target\release\bundle\nsis\Miniature Catalog_<version>_x64-setup.exe`. The executable is `frontend\src-tauri\target\release\miniature-catalog-desktop.exe`.
 
-Signing keys are not in the repo. Set them in the same PowerShell session when you want `latest.json`:
-
-```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "C:\path\to\miniature-catalog.key"
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "the password for that key"
-npm run release
-```
-
-`TAURI_SIGNING_PRIVATE_KEY` may be the key file contents, as above, or the path to the key file. Without those variables the installer can still be built with `npm run tauri build`, and `npm run release` stops at the missing `.sig` file.
-
-This catalog does not check for updates. Nothing in the app reads `latest.json`, and there is no updater public key. The file is only the same release artifact 3D File Library writes. `npm run release` does not create a git tag or a GitHub release.
+This app does not check for updates. There is no signing key and no `latest.json`.
 
 ## Tests
 
