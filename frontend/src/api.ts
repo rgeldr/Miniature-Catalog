@@ -29,6 +29,22 @@ export type Facets = {
   games: string[];
 };
 
+export type FilterEntry = {
+  name: string;
+  used_by: number;
+  id?: number;
+  parent_id?: number | null;
+  kind?: string;
+  path?: string;
+  child_count?: number;
+};
+
+export type FilterGroup = {
+  category: string;
+  label: string;
+  entries: FilterEntry[];
+};
+
 export type LocationReport = {
   id: number;
   parent_id: number | null;
@@ -107,6 +123,32 @@ export class CatalogApi {
 
   facets(): Promise<Facets> {
     return this.request("GET", "/api/v1/facets");
+  }
+
+  filters(): Promise<{ groups: FilterGroup[] }> {
+    return this.request("GET", "/api/v1/filters");
+  }
+
+  addFilter(input: {
+    category: string;
+    name: string;
+    kind?: string;
+    parent_id?: number | null;
+  }): Promise<FilterEntry> {
+    return this.request("POST", "/api/v1/filters", input);
+  }
+
+  renameFilter(input: {
+    category: string;
+    name?: string;
+    new_name: string;
+    id?: number;
+  }): Promise<FilterEntry> {
+    return this.request("PATCH", "/api/v1/filters", input);
+  }
+
+  deleteFilter(input: { category: string; name?: string; id?: number }): Promise<void> {
+    return this.request("DELETE", "/api/v1/filters", input);
   }
 
   report(): Promise<{ locations: LocationReport[] }> {

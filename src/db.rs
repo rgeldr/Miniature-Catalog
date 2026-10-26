@@ -198,9 +198,14 @@ pub fn delete_location(conn: &Connection, id: i64) -> Result<(), DbError> {
         |row| row.get(0),
     )?;
     if children > 0 {
-        return Err(DbError::Conflict(
-            "remove the locations inside this one first".into(),
-        ));
+        let noun = if children == 1 {
+            "location is"
+        } else {
+            "locations are"
+        };
+        return Err(DbError::Conflict(format!(
+            "{children} {noun} inside this one. Move or delete them before deleting it."
+        )));
     }
     let miniatures: i64 = conn.query_row(
         "SELECT COUNT(*) FROM miniatures WHERE location_id = ?1",
@@ -208,9 +213,14 @@ pub fn delete_location(conn: &Connection, id: i64) -> Result<(), DbError> {
         |row| row.get(0),
     )?;
     if miniatures > 0 {
-        return Err(DbError::Conflict(
-            "move or delete the miniatures stored here first".into(),
-        ));
+        let noun = if miniatures == 1 {
+            "miniature is"
+        } else {
+            "miniatures are"
+        };
+        return Err(DbError::Conflict(format!(
+            "{miniatures} {noun} stored here. Move them before deleting this location."
+        )));
     }
     let changed = conn.execute("DELETE FROM locations WHERE id = ?1", [id])?;
     if changed == 0 {
@@ -472,6 +482,18 @@ pub fn facets(conn: &Connection) -> Result<Facets, DbError> {
             push_one(&mut games, game);
         }
     }
+    let mut term_stmt = conn.prepare("SELECT category, name FROM facet_terms")?;
+    let term_rows = term_stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in term_rows {
+        let (category, name) = row?;
+        match category.as_str() {
+            "size" => push_one(&mut sizes, name),
+            "game" => push_one(&mut games, name),
+            _ => {}
+        }
+    }
     for values in [&mut races, &mut roles, &mut combat, &mut sizes, &mut games] {
         values.sort();
     }
@@ -482,6 +504,497 @@ pub fn facets(conn: &Connection) -> Result<Facets, DbError> {
         sizes,
         games,
     })
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FilterEntry {
+    pub name: String,
+    pub used_by: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FilterGroup {
+    pub category: String,
+    pub label: String,
+    pub entries: Vec<FilterEntry>,
+}
+
+pub fn list_filters(conn: &Connection) -> Result<Vec<FilterGroup>, DbError> {
+    Ok(vec![
+        tag_group(conn, "race", "Race / type")?,
+        tag_group(conn, "combat", "Combat style")?,
+        facet_group(conn, "size", "Size")?,
+        tag_group(conn, "role", "Role")?,
+        facet_group(conn, "game", "Game")?,
+        location_group(conn)?,
+    ])
+}
+
+pub fn add_filter(
+    conn: &Connection,
+    category: &str,
+    name: &str,
+    kind: Option<&str>,
+    parent_id: Option<i64>,
+) -> Result<FilterEntry, DbError> {
+    match category {
+        "race" | "role" | "combat" => add_tag_filter(conn, category, name),
+        "size" | "game" => add_facet_filter(conn, category, name),
+        "location" => add_location_filter(conn, name, kind.unwrap_or(""), parent_id),
+        _ => Err(unknown_category()),
+    }
+}
+
+pub fn rename_filter(
+    conn: &Connection,
+    category: &str,
+    name: &str,
+    new_name: &str,
+    id: Option<i64>,
+) -> Result<FilterEntry, DbError> {
+    match category {
+        "race" | "role" | "combat" => {
+            rename_tag_filter(conn, category, name, new_name)?;
+            let stored = single_tag_name(new_name)?;
+            tag_entry(conn, category, &stored)
+        }
+        "size" | "game" => {
+            let stored = rename_facet_filter(conn, category, name, new_name)?;
+            facet_entry(conn, category, &stored)
+        }
+        "location" => {
+            let id = id.ok_or_else(|| DbError::Invalid("location id is required".into()))?;
+            rename_location_filter(conn, id, new_name)
+        }
+        _ => Err(unknown_category()),
+    }
+}
+
+pub fn delete_filter(
+    conn: &Connection,
+    category: &str,
+    name: &str,
+    id: Option<i64>,
+) -> Result<(), DbError> {
+    match category {
+        "race" | "role" | "combat" => delete_tag_filter(conn, category, name),
+        "size" | "game" => delete_facet_filter(conn, category, name),
+        "location" => {
+            let id = id.ok_or_else(|| DbError::Invalid("location id is required".into()))?;
+            delete_location(conn, id)
+        }
+        _ => Err(unknown_category()),
+    }
+}
+
+fn unknown_category() -> DbError {
+    DbError::Invalid("category must be race, combat, size, role, game, or location".into())
+}
+
+fn category_label(category: &str) -> &str {
+    match category {
+        "combat" => "combat style",
+        other => other,
+    }
+}
+
+fn already_named(label: &str, name: &str) -> String {
+    format!("a {label} named \"{name}\" already exists")
+}
+
+fn rename_refused(label: &str, name: &str) -> String {
+    format!(
+        "{}. The rename was not applied.",
+        already_named(label, name)
+    )
+}
+
+fn still_in_use(label: &str, count: i64) -> String {
+    if count == 1 {
+        format!("1 miniature still uses this {label}. Reassign it before deleting.")
+    } else {
+        format!("{count} miniatures still use this {label}. Reassign them before deleting.")
+    }
+}
+
+fn single_tag_name(name: &str) -> Result<String, DbError> {
+    let names = normalize_tags(&[name.to_string()])?;
+    names
+        .into_iter()
+        .next()
+        .ok_or_else(|| DbError::Invalid("name is required".into()))
+}
+
+fn tag_group(conn: &Connection, category: &str, label: &str) -> Result<FilterGroup, DbError> {
+    let tags = list_tags(conn)?;
+    let mut entries = Vec::new();
+    for tag in tags.into_iter().filter(|tag| tag.category == category) {
+        entries.push(tag_entry(conn, category, &tag.name)?);
+    }
+    Ok(FilterGroup {
+        category: category.to_string(),
+        label: label.to_string(),
+        entries,
+    })
+}
+
+fn tag_entry(conn: &Connection, category: &str, name: &str) -> Result<FilterEntry, DbError> {
+    let tag = list_tags(conn)?
+        .into_iter()
+        .find(|tag| tag.category == category && tag.name == name)
+        .ok_or(DbError::NotFound)?;
+    let used_by: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM miniature_tags WHERE tag_id = ?1",
+        [tag.id],
+        |row| row.get(0),
+    )?;
+    Ok(plain_entry(tag.name, used_by))
+}
+
+fn add_tag_filter(conn: &Connection, category: &str, name: &str) -> Result<FilterEntry, DbError> {
+    let stored = single_tag_name(name)?;
+    if list_tags(conn)?
+        .iter()
+        .any(|tag| tag.category == category && tag.name == stored)
+    {
+        return Err(DbError::Conflict(already_named(
+            category_label(category),
+            &stored,
+        )));
+    }
+    create_tag(conn, category, &stored)?;
+    tag_entry(conn, category, &stored)
+}
+
+fn rename_tag_filter(
+    conn: &Connection,
+    category: &str,
+    name: &str,
+    new_name: &str,
+) -> Result<(), DbError> {
+    let old = single_tag_name(name)?;
+    let new = single_tag_name(new_name)?;
+    let tags = list_tags(conn)?;
+    let Some(tag) = tags
+        .iter()
+        .find(|tag| tag.category == category && tag.name == old)
+    else {
+        return Err(DbError::NotFound);
+    };
+    if old == new {
+        return Ok(());
+    }
+    if tags
+        .iter()
+        .any(|other| other.category == category && other.name == new)
+    {
+        return Err(DbError::Conflict(rename_refused(
+            category_label(category),
+            &new,
+        )));
+    }
+    let label = category_label(category);
+    conn.execute(
+        "UPDATE tags SET name = ?1 WHERE id = ?2",
+        params![new, tag.id],
+    )
+    .map_err(|err| match DbError::from(err) {
+        DbError::Conflict(_) => DbError::Conflict(rename_refused(label, &new)),
+        other => other,
+    })?;
+    Ok(())
+}
+
+fn delete_tag_filter(conn: &Connection, category: &str, name: &str) -> Result<(), DbError> {
+    let stored = single_tag_name(name)?;
+    let tag = list_tags(conn)?
+        .into_iter()
+        .find(|tag| tag.category == category && tag.name == stored)
+        .ok_or(DbError::NotFound)?;
+    let used_by: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM miniature_tags WHERE tag_id = ?1",
+        [tag.id],
+        |row| row.get(0),
+    )?;
+    if used_by > 0 {
+        return Err(DbError::Conflict(still_in_use(
+            category_label(category),
+            used_by,
+        )));
+    }
+    conn.execute("DELETE FROM tags WHERE id = ?1", [tag.id])?;
+    Ok(())
+}
+
+fn facet_group(conn: &Connection, category: &str, label: &str) -> Result<FilterGroup, DbError> {
+    let names = facet_names(conn, category)?;
+    let mut entries = Vec::with_capacity(names.len());
+    for name in names {
+        entries.push(facet_entry(conn, category, &name)?);
+    }
+    Ok(FilterGroup {
+        category: category.to_string(),
+        label: label.to_string(),
+        entries,
+    })
+}
+
+fn facet_names(conn: &Connection, category: &str) -> Result<Vec<String>, DbError> {
+    let mut names = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT name FROM facet_terms WHERE category = ?1")?;
+        let rows = stmt.query_map([category], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            push_one(&mut names, row?);
+        }
+    }
+    let sql = match category {
+        "size" => "SELECT size FROM miniatures",
+        "game" => "SELECT game FROM miniatures WHERE game IS NOT NULL",
+        _ => return Err(DbError::Invalid("category must be size or game".into())),
+    };
+    {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            push_one(&mut names, row?);
+        }
+    }
+    names.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then(left.cmp(right))
+    });
+    Ok(names)
+}
+
+fn facet_entry(conn: &Connection, category: &str, name: &str) -> Result<FilterEntry, DbError> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT name FROM facet_terms WHERE category = ?1 AND name = ?2 COLLATE NOCASE",
+            params![category, name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(plain_entry(
+        stored.unwrap_or_else(|| name.to_string()),
+        facet_used_by(conn, category, name)?,
+    ))
+}
+
+fn facet_used_by(conn: &Connection, category: &str, name: &str) -> Result<i64, DbError> {
+    let sql = match category {
+        "size" => "SELECT COUNT(*) FROM miniatures WHERE size = ?1 COLLATE NOCASE",
+        "game" => "SELECT COUNT(*) FROM miniatures WHERE game = ?1 COLLATE NOCASE",
+        _ => return Err(DbError::Invalid("category must be size or game".into())),
+    };
+    Ok(conn.query_row(sql, [name], |row| row.get(0))?)
+}
+
+fn facet_known(conn: &Connection, category: &str, name: &str) -> Result<bool, DbError> {
+    if facet_used_by(conn, category, name)? > 0 {
+        return Ok(true);
+    }
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM facet_terms WHERE category = ?1 AND name = ?2 COLLATE NOCASE",
+            params![category, name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+fn clean_facet_name(category: &str, name: &str) -> Result<String, DbError> {
+    match category {
+        "size" => required(name, "name", 32),
+        "game" => required(name, "name", 120),
+        _ => Err(DbError::Invalid("category must be size or game".into())),
+    }
+}
+
+fn add_facet_filter(conn: &Connection, category: &str, name: &str) -> Result<FilterEntry, DbError> {
+    let stored = clean_facet_name(category, name)?;
+    if facet_known(conn, category, &stored)? {
+        return Err(DbError::Conflict(already_named(category, &stored)));
+    }
+    conn.execute(
+        "INSERT INTO facet_terms (category, name) VALUES (?1, ?2)",
+        params![category, stored],
+    )
+    .map_err(|err| match DbError::from(err) {
+        DbError::Conflict(_) => DbError::Conflict(already_named(category, &stored)),
+        other => other,
+    })?;
+    facet_entry(conn, category, &stored)
+}
+
+fn rename_facet_filter(
+    conn: &Connection,
+    category: &str,
+    name: &str,
+    new_name: &str,
+) -> Result<String, DbError> {
+    let old = clean_facet_name(category, name)?;
+    let new = clean_facet_name(category, new_name)?;
+    if !facet_known(conn, category, &old)? {
+        return Err(DbError::NotFound);
+    }
+    if !old.eq_ignore_ascii_case(&new) && facet_known(conn, category, &new)? {
+        return Err(DbError::Conflict(rename_refused(category, &new)));
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mini_sql = match category {
+        "size" => "UPDATE miniatures SET size = ?1 WHERE size = ?2 COLLATE NOCASE",
+        "game" => "UPDATE miniatures SET game = ?1 WHERE game = ?2 COLLATE NOCASE",
+        _ => return Err(DbError::Invalid("category must be size or game".into())),
+    };
+    tx.execute(mini_sql, params![new, old])?;
+    tx.execute(
+        "UPDATE facet_terms SET name = ?1 WHERE category = ?2 AND name = ?3 COLLATE NOCASE",
+        params![new, category, old],
+    )?;
+    tx.commit()?;
+    Ok(new)
+}
+
+fn delete_facet_filter(conn: &Connection, category: &str, name: &str) -> Result<(), DbError> {
+    let stored = clean_facet_name(category, name)?;
+    if !facet_known(conn, category, &stored)? {
+        return Err(DbError::NotFound);
+    }
+    let used_by = facet_used_by(conn, category, &stored)?;
+    if used_by > 0 {
+        return Err(DbError::Conflict(still_in_use(category, used_by)));
+    }
+    let changed = conn.execute(
+        "DELETE FROM facet_terms WHERE category = ?1 AND name = ?2 COLLATE NOCASE",
+        params![category, stored],
+    )?;
+    if changed == 0 {
+        return Err(DbError::NotFound);
+    }
+    Ok(())
+}
+
+fn location_group(conn: &Connection) -> Result<FilterGroup, DbError> {
+    let locations = list_locations(conn)?;
+    let mut entries = Vec::with_capacity(locations.len());
+    for location in locations {
+        entries.push(location_entry(conn, location.id)?);
+    }
+    Ok(FilterGroup {
+        category: "location".into(),
+        label: "Location".into(),
+        entries,
+    })
+}
+
+fn location_entry(conn: &Connection, id: i64) -> Result<FilterEntry, DbError> {
+    let location = get_location(conn, id)?.ok_or(DbError::NotFound)?;
+    let child_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM locations WHERE parent_id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    let used_by: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM miniatures WHERE location_id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(FilterEntry {
+        name: location.name,
+        used_by,
+        id: Some(location.id),
+        parent_id: location.parent_id,
+        kind: Some(location.kind),
+        path: Some(location.path),
+        child_count: Some(child_count),
+    })
+}
+
+fn sibling_name_taken(
+    conn: &Connection,
+    parent_id: Option<i64>,
+    name: &str,
+    except: Option<i64>,
+) -> Result<bool, DbError> {
+    let rows = load_location_rows(conn)?;
+    Ok(rows
+        .iter()
+        .any(|row| row.parent_id == parent_id && row.name == name && except != Some(row.id)))
+}
+
+fn add_location_filter(
+    conn: &Connection,
+    name: &str,
+    kind: &str,
+    parent_id: Option<i64>,
+) -> Result<FilterEntry, DbError> {
+    let clean = clean_location_name(name)?;
+    if sibling_name_taken(conn, parent_id, &clean, None)? {
+        return Err(DbError::Conflict(format!(
+            "a location named \"{clean}\" already exists in the same place."
+        )));
+    }
+    let created = create_location(
+        conn,
+        NewLocation {
+            name: clean,
+            kind: kind.to_string(),
+            parent_id,
+        },
+    )?;
+    location_entry(conn, created.id)
+}
+
+fn rename_location_filter(
+    conn: &Connection,
+    id: i64,
+    new_name: &str,
+) -> Result<FilterEntry, DbError> {
+    let location = get_location(conn, id)?.ok_or(DbError::NotFound)?;
+    let clean = clean_location_name(new_name)?;
+    if clean == location.name {
+        return location_entry(conn, id);
+    }
+    if sibling_name_taken(conn, location.parent_id, &clean, Some(id))? {
+        return Err(DbError::Conflict(format!(
+            "a location named \"{clean}\" already exists in the same place. The rename was not applied."
+        )));
+    }
+    update_location(
+        conn,
+        id,
+        NewLocation {
+            name: clean,
+            kind: location.kind,
+            parent_id: location.parent_id,
+        },
+    )?;
+    location_entry(conn, id)
+}
+
+fn plain_entry(name: String, used_by: i64) -> FilterEntry {
+    FilterEntry {
+        name,
+        used_by,
+        id: None,
+        parent_id: None,
+        kind: None,
+        path: None,
+        child_count: None,
+    }
 }
 
 pub fn insert_api_key(
@@ -795,6 +1308,18 @@ fn replace_tags(conn: &Connection, miniature_id: i64, mini: &NewMiniature) -> Re
 }
 
 fn ensure_tag(conn: &Connection, category: &str, name: &str) -> Result<i64, DbError> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM tags
+             WHERE category = ?1 AND name = ?2 COLLATE NOCASE
+             ORDER BY id LIMIT 1",
+            params![category, name],
+            |row| row.get(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
     conn.execute(
         "INSERT INTO tags (category, name) VALUES (?1, ?2)
          ON CONFLICT(category, name) DO NOTHING",
@@ -1024,9 +1549,9 @@ fn clean_location_name(value: &str) -> Result<String, DbError> {
 }
 
 fn normalize_tags(values: &[String]) -> Result<Vec<String>, DbError> {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     for value in values {
-        let name = value.trim().to_lowercase();
+        let name = value.trim();
         if name.is_empty() {
             continue;
         }
@@ -1041,9 +1566,13 @@ fn normalize_tags(values: &[String]) -> Result<Vec<String>, DbError> {
                 "tag \"{name}\" has unsupported characters"
             )));
         }
-        if !out.contains(&name) {
-            out.push(name);
+        if out
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            continue;
         }
+        out.push(name.to_string());
     }
     if out.len() > 20 {
         return Err(DbError::Invalid("too many tags in one category".into()));
@@ -1155,5 +1684,150 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, DbError::Invalid(_)));
+    }
+
+    fn desk(conn: &Connection) -> i64 {
+        create_location(
+            conn,
+            NewLocation {
+                name: "Desk".into(),
+                kind: "room".into(),
+                parent_id: None,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    fn mini(
+        location_id: i64,
+        races: Vec<String>,
+        roles: Vec<String>,
+        combat: Vec<String>,
+    ) -> NewMiniature {
+        NewMiniature {
+            name: "Hero".into(),
+            notes: String::new(),
+            quantity: 1,
+            size: "28mm".into(),
+            game: None,
+            location_id,
+            races,
+            roles,
+            combat,
+        }
+    }
+
+    #[test]
+    fn tags_keep_the_case_that_was_entered() {
+        let conn = conn();
+        let location_id = desk(&conn);
+        let created = create_miniature(
+            &conn,
+            mini(
+                location_id,
+                vec!["Orc".into()],
+                vec!["Mage".into()],
+                vec!["Magic and Melee".into()],
+            ),
+        )
+        .unwrap();
+        assert_eq!(created.races, vec!["Orc"]);
+        assert_eq!(created.roles, vec!["Mage"]);
+        assert_eq!(created.combat, vec!["Magic and Melee"]);
+
+        let tag = create_tag(&conn, "race", "Goblin").unwrap();
+        assert_eq!(tag.name, "Goblin");
+    }
+
+    #[test]
+    fn tag_dedupe_is_case_insensitive_and_keeps_the_first_spelling() {
+        let conn = conn();
+        let location_id = desk(&conn);
+        let first = create_miniature(
+            &conn,
+            mini(
+                location_id,
+                vec!["Orc".into(), " orc ".into(), "ORC".into()],
+                vec!["Mage".into()],
+                vec!["Ranged".into()],
+            ),
+        )
+        .unwrap();
+        assert_eq!(first.races, vec!["Orc"]);
+        assert_eq!(first.combat, vec!["Ranged"]);
+
+        let second = create_miniature(
+            &conn,
+            mini(
+                location_id,
+                vec!["orc".into()],
+                vec!["mage".into()],
+                vec!["ranged".into()],
+            ),
+        )
+        .unwrap();
+        assert_eq!(second.races, vec!["Orc"]);
+        assert_eq!(second.roles, vec!["Mage"]);
+        assert_eq!(second.combat, vec!["Ranged"]);
+
+        let updated = update_miniature(
+            &conn,
+            first.id,
+            validate_miniature(mini(
+                location_id,
+                vec!["orc".into(), "Elf".into()],
+                vec!["Mage".into()],
+                vec!["RANGED".into()],
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(updated.races.len(), 2);
+        assert!(updated.races.iter().any(|race| race == "Orc"));
+        assert!(updated.races.iter().any(|race| race == "Elf"));
+        assert_eq!(updated.combat, vec!["Ranged"]);
+
+        let found = list_miniatures(
+            &conn,
+            &MiniFilter {
+                races: vec!["orc".into()],
+                combat: vec!["RANGED".into()],
+                ..MiniFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(found.len(), 2);
+
+        let race_tags: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE category = 'race' AND name = 'orc' COLLATE NOCASE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(race_tags, 1);
+        let all_races: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE category = 'race'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(all_races, 2);
+        let orc: String = conn
+            .query_row(
+                "SELECT name FROM tags WHERE category = 'race' AND name = 'orc' COLLATE NOCASE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orc, "Orc");
+
+        let original = create_tag(&conn, "race", "Goblin").unwrap();
+        let again = create_tag(&conn, "race", "goblin").unwrap();
+        assert_eq!(again.id, original.id);
+        assert_eq!(original.name, "Goblin");
+        assert_eq!(again.name, "Goblin");
     }
 }

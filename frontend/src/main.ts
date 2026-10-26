@@ -2,10 +2,13 @@ import {
   CatalogApi,
   type ApiSettings,
   type Facets,
+  type FilterEntry,
+  type FilterGroup,
   type Location,
   type LocationReport,
   type Miniature,
 } from "./api";
+import { version } from "../package.json";
 import { applyTheme, currentTheme, readTheme } from "./theme";
 
 applyTheme(readTheme(), false);
@@ -26,11 +29,20 @@ const thumbs = new Map<number, string>();
 
 app.innerHTML = `
   <nav class="menubar" role="menubar" aria-label="Main">
-    <button id="file-menu-button" type="button" role="menuitem" aria-haspopup="menu" aria-expanded="false" aria-controls="file-menu">File</button>
-    <div id="file-menu" class="menu" role="menu" aria-labelledby="file-menu-button" hidden>
-      <button id="menu-add" type="button" role="menuitem">Add a miniature</button>
-      <button id="menu-storage" type="button" role="menuitem">Storage</button>
-      <button id="menu-encounter" type="button" role="menuitem">Encounter generator</button>
+    <div class="menu-root">
+      <button id="file-menu-button" type="button" role="menuitem" aria-haspopup="menu" aria-expanded="false" aria-controls="file-menu">File</button>
+      <div id="file-menu" class="menu" role="menu" aria-labelledby="file-menu-button" hidden>
+        <button id="menu-add" type="button" role="menuitem">Add a miniature</button>
+        <button id="menu-storage" type="button" role="menuitem">Storage</button>
+        <button id="menu-encounter" type="button" role="menuitem">Encounter generator</button>
+        <button id="menu-filters" type="button" role="menuitem">Edit filters</button>
+      </div>
+    </div>
+    <div class="menu-root">
+      <button id="help-menu-button" type="button" role="menuitem" aria-haspopup="menu" aria-expanded="false" aria-controls="help-menu">Help</button>
+      <div id="help-menu" class="menu" role="menu" aria-labelledby="help-menu-button" hidden>
+        <button id="menu-about" type="button" role="menuitem">About</button>
+      </div>
     </div>
   </nav>
   <header>
@@ -49,7 +61,7 @@ app.innerHTML = `
   <div id="message"></div>
   <main>
     <section class="panel">
-      <h2>Find</h2>
+      <h2>Filters</h2>
       <label class="block" for="q">Name</label>
       <input id="q" type="search" placeholder="wizard, orc warrior" />
       <div id="filters"></div>
@@ -105,6 +117,23 @@ app.innerHTML = `
     <div id="new-key"></div>
     <div id="keys"></div>
   </dialog>
+  <dialog id="filter-dialog" aria-labelledby="filter-title">
+    <div class="dialog-head">
+      <h2 id="filter-title">Edit filters</h2>
+      <button id="filter-close" class="quiet" type="button">Close</button>
+    </div>
+    <p class="empty">Renaming updates every miniature that uses that value. A name that already exists is refused. Deleting is blocked while miniatures still use it, or while a location still has something inside it.</p>
+    <p id="filter-message" class="warn"></p>
+    <div id="filter-editor"></div>
+  </dialog>
+  <dialog id="about-dialog" aria-labelledby="about-title">
+    <div class="dialog-head">
+      <h2 id="about-title">About</h2>
+      <button id="about-close" class="quiet" type="button">Close</button>
+    </div>
+    <p><strong>Miniature Catalog</strong></p>
+    <p>Version <span id="about-version"></span></p>
+  </dialog>
 `;
 
 paintThemeToggle();
@@ -113,8 +142,11 @@ must<HTMLButtonElement>("#theme-toggle").addEventListener("click", () => {
   paintThemeToggle();
 });
 
-const fileButton = must<HTMLButtonElement>("#file-menu-button");
-const fileMenu = must<HTMLDivElement>("#file-menu");
+const menus: Menu[] = [
+  { button: must<HTMLButtonElement>("#file-menu-button"), panel: must<HTMLDivElement>("#file-menu") },
+  { button: must<HTMLButtonElement>("#help-menu-button"), panel: must<HTMLDivElement>("#help-menu") },
+];
+must<HTMLElement>("#about-version").textContent = version;
 wireMenu();
 for (const dialog of Array.from(document.querySelectorAll<HTMLDialogElement>("dialog"))) wireDialog(dialog);
 must<HTMLButtonElement>("#menu-add").addEventListener("click", () => {
@@ -126,6 +158,12 @@ must<HTMLButtonElement>("#menu-storage").addEventListener("click", () => {
 must<HTMLButtonElement>("#menu-encounter").addEventListener("click", () => {
   showDialog(must<HTMLDialogElement>("#encounter-dialog"), "#encounter-close");
 });
+must<HTMLButtonElement>("#menu-filters").addEventListener("click", () => {
+  void openFilters();
+});
+must<HTMLButtonElement>("#menu-about").addEventListener("click", () => {
+  showDialog(must<HTMLDialogElement>("#about-dialog"), "#about-close");
+});
 must<HTMLButtonElement>("#mini-close").addEventListener("click", () => {
   must<HTMLDialogElement>("#mini-dialog").close();
 });
@@ -134,6 +172,12 @@ must<HTMLButtonElement>("#storage-close").addEventListener("click", () => {
 });
 must<HTMLButtonElement>("#encounter-close").addEventListener("click", () => {
   must<HTMLDialogElement>("#encounter-dialog").close();
+});
+must<HTMLButtonElement>("#filter-close").addEventListener("click", () => {
+  must<HTMLDialogElement>("#filter-dialog").close();
+});
+must<HTMLButtonElement>("#about-close").addEventListener("click", () => {
+  must<HTMLDialogElement>("#about-dialog").close();
 });
 
 function paintThemeToggle(): void {
@@ -159,72 +203,100 @@ function focusable(root: ParentNode): HTMLElement[] {
   );
 }
 
-function openFileMenu(): void {
-  fileMenu.hidden = false;
-  fileButton.setAttribute("aria-expanded", "true");
-  fileMenu.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
+type Menu = { button: HTMLButtonElement; panel: HTMLElement };
+
+function openMenu(menu: Menu): void {
+  for (const other of menus) {
+    const open = other === menu;
+    other.panel.hidden = !open;
+    other.button.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  menu.panel.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
 }
 
-function closeFileMenu(focusButton = false): void {
-  fileMenu.hidden = true;
-  fileButton.setAttribute("aria-expanded", "false");
-  if (focusButton) fileButton.focus();
+function closeMenus(focus?: HTMLElement): void {
+  for (const menu of menus) {
+    menu.panel.hidden = true;
+    menu.button.setAttribute("aria-expanded", "false");
+  }
+  focus?.focus();
 }
 
 function wireMenu(): void {
-  fileButton.addEventListener("click", () => {
-    if (fileMenu.hidden) openFileMenu();
-    else closeFileMenu();
-  });
-  fileButton.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      openFileMenu();
-    }
-  });
-  fileMenu.addEventListener("keydown", (event) => {
-    const items = Array.from(fileMenu.querySelectorAll<HTMLButtonElement>("[role=menuitem]"));
-    const index = items.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeFileMenu(true);
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      items[(index + 1) % items.length]?.focus();
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      items[(index - 1 + items.length) % items.length]?.focus();
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      items[0]?.focus();
-    } else if (event.key === "End") {
-      event.preventDefault();
-      items[items.length - 1]?.focus();
-    } else if (event.key === "Tab") {
-      closeFileMenu();
-    }
-  });
+  for (const menu of menus) {
+    menu.button.addEventListener("click", () => {
+      if (menu.panel.hidden) openMenu(menu);
+      else closeMenus();
+    });
+    menu.button.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openMenu(menu);
+      } else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+        event.preventDefault();
+        const next = siblingMenu(menu, event.key === "ArrowRight" ? 1 : -1);
+        if (menu.panel.hidden) next.button.focus();
+        else openMenu(next);
+      }
+    });
+    menu.panel.addEventListener("keydown", (event) => {
+      const items = Array.from(menu.panel.querySelectorAll<HTMLButtonElement>("[role=menuitem]"));
+      const index = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeMenus(menu.button);
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        items[(index + 1) % items.length]?.focus();
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        items[(index - 1 + items.length) % items.length]?.focus();
+      } else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+        event.preventDefault();
+        openMenu(siblingMenu(menu, event.key === "ArrowRight" ? 1 : -1));
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        items[0]?.focus();
+      } else if (event.key === "End") {
+        event.preventDefault();
+        items[items.length - 1]?.focus();
+      } else if (event.key === "Tab") {
+        closeMenus();
+      }
+    });
+  }
   document.addEventListener("click", (event) => {
-    if (fileMenu.hidden) return;
+    if (menus.every((menu) => menu.panel.hidden)) return;
     const target = event.target;
-    if (target instanceof Node && (fileButton.contains(target) || fileMenu.contains(target))) return;
-    closeFileMenu();
+    if (!(target instanceof Node)) return;
+    if (menus.some((menu) => menu.button.contains(target) || menu.panel.contains(target))) return;
+    closeMenus();
   });
   document.addEventListener("keydown", (event) => {
-    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "f") {
-      if (document.querySelector("dialog[open]")) return;
-      event.preventDefault();
-      fileButton.focus();
-      openFileMenu();
-    }
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (document.querySelector("dialog[open]")) return;
+    const key = event.key.toLowerCase();
+    const menu = key === "f" ? menus[0] : key === "h" ? menus[1] : null;
+    if (!menu) return;
+    event.preventDefault();
+    menu.button.focus();
+    openMenu(menu);
   });
 }
 
+function siblingMenu(menu: Menu, step: number): Menu {
+  const index = menus.indexOf(menu);
+  return menus[(index + step + menus.length) % menus.length];
+}
+
 function showDialog(dialog: HTMLDialogElement, focusSelector: string): void {
-  returnFocus = fileButton;
   const active = document.activeElement;
-  if (active instanceof HTMLElement && !fileMenu.contains(active)) returnFocus = active;
-  closeFileMenu();
+  returnFocus = menus[0].button;
+  if (active instanceof HTMLElement) {
+    const owner = menus.find((menu) => menu.panel.contains(active) || menu.button === active);
+    returnFocus = owner ? owner.button : active;
+  }
+  closeMenus();
   restoreFocus = false;
   for (const other of Array.from(document.querySelectorAll<HTMLDialogElement>("dialog[open]"))) {
     if (other !== dialog) other.close();
@@ -306,6 +378,16 @@ function splitExtra(value: string): string[] {
     .filter(Boolean);
 }
 
+function uniqueTags(values: string[]): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    if (!out.some((existing) => existing.toLowerCase() === value.toLowerCase())) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+
 function queryFromFilters(): string {
   const params = new URLSearchParams();
   const q = must<HTMLInputElement>("#q").value.trim();
@@ -330,7 +412,7 @@ function checks(name: string, values: string[], selected: string[]): string {
   if (!values.length) return `<p class="empty">None yet.</p>`;
   return `<div class="checks">${values
     .map((value) => {
-      const on = selected.includes(value) ? "checked" : "";
+      const on = selected.some((item) => item.toLowerCase() === value.toLowerCase()) ? "checked" : "";
       return `<label><input type="checkbox" name="${esc(name)}" value="${esc(value)}" ${on} /> ${esc(value)}</label>`;
     })
     .join("")}</div>`;
@@ -345,7 +427,7 @@ function renderFilters(facets: Facets, locations: Location[]): void {
     game: checked("game"),
     location: checked("location"),
   };
-  const combat = [...new Set([...COMBAT, ...facets.combat])].sort();
+  const combat = uniqueTags([...facets.combat, ...COMBAT]).sort();
   const locationChecks = locations.length
     ? `<div class="checks">${locations
         .map((location) => {
@@ -370,6 +452,138 @@ function renderFilters(facets: Facets, locations: Location[]): void {
   `;
 }
 
+function filterSay(text: string): void {
+  must<HTMLParagraphElement>("#filter-message").textContent = text;
+}
+
+async function openFilters(): Promise<void> {
+  filterSay("");
+  showDialog(must<HTMLDialogElement>("#filter-dialog"), "#filter-close");
+  try {
+    await reloadFilterEditor();
+  } catch (error) {
+    filterSay(error instanceof Error ? error.message : "Could not load filters.");
+  }
+}
+
+async function reloadFilterEditor(): Promise<void> {
+  const groups = (await api().filters()).groups;
+  renderFilterEditor(groups);
+  await refresh();
+}
+
+function renderFilterEditor(groups: FilterGroup[]): void {
+  const locations = groups.find((group) => group.category === "location")?.entries ?? [];
+  const parentOptions = [`<option value="">Top level</option>`]
+    .concat(
+      locations.map(
+        (entry) => `<option value="${entry.id}">${esc(entry.path ?? entry.name)}</option>`,
+      ),
+    )
+    .join("");
+  must<HTMLDivElement>("#filter-editor").innerHTML = groups
+    .map((group) => {
+      const rows = group.entries
+        .map((entry) => filterRow(group, entry))
+        .join("");
+      const add =
+        group.category === "location"
+          ? `<form class="row filter-add" data-add-filter="location">
+              <label>Name<input name="name" type="text" required placeholder="Drawer 4" /></label>
+              <label>Kind<input name="kind" type="text" required placeholder="drawer" /></label>
+              <label>Inside<select name="parent_id">${parentOptions}</select></label>
+              <button type="submit">Add</button>
+            </form>`
+          : `<form class="row filter-add" data-add-filter="${esc(group.category)}">
+              <label>New ${esc(group.label.toLowerCase())}<input name="name" type="text" required /></label>
+              <button type="submit">Add</button>
+            </form>`;
+      return `<section>
+        <h3>${esc(group.label)}</h3>
+        ${rows || `<p class="empty">None yet.</p>`}
+        ${add}
+      </section>`;
+    })
+    .join("");
+  const host = must<HTMLDivElement>("#filter-editor");
+  host.querySelectorAll<HTMLButtonElement>("[data-rename]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const row = button.closest<HTMLElement>("[data-filter-row]");
+      if (!row) return;
+      const input = row.querySelector<HTMLInputElement>("input");
+      if (!input) return;
+      const id = row.dataset.id ? Number(row.dataset.id) : undefined;
+      void changeFilter(() =>
+        api().renameFilter({
+          category: row.dataset.category ?? "",
+          name: row.dataset.name,
+          new_name: input.value,
+          id,
+        }),
+      );
+    });
+  });
+  host.querySelectorAll<HTMLButtonElement>("[data-delete-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const row = button.closest<HTMLElement>("[data-filter-row]");
+      if (!row) return;
+      const used = Number(row.dataset.used ?? "0");
+      const children = Number(row.dataset.children ?? "0");
+      const name = row.dataset.name ?? "";
+      if (used === 0 && children === 0 && !confirm(`Delete ${name}? Nothing uses it.`)) return;
+      const id = row.dataset.id ? Number(row.dataset.id) : undefined;
+      void changeFilter(() =>
+        api().deleteFilter({
+          category: row.dataset.category ?? "",
+          name,
+          id,
+        }),
+      );
+    });
+  });
+  host.querySelectorAll<HTMLFormElement>("[data-add-filter]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      const category = form.dataset.addFilter ?? "";
+      const parent = String(data.get("parent_id") ?? "");
+      void changeFilter(() =>
+        api().addFilter({
+          category,
+          name: String(data.get("name") ?? ""),
+          kind: category === "location" ? String(data.get("kind") ?? "") : undefined,
+          parent_id: category === "location" ? (parent ? Number(parent) : null) : undefined,
+        }),
+      );
+    });
+  });
+}
+
+function filterRow(group: FilterGroup, entry: FilterEntry): string {
+  const id = entry.id === undefined ? "" : ` data-id="${entry.id}"`;
+  const where = entry.path ? `<p class="filter-meta">${esc(entry.path)}</p>` : "";
+  const kind = entry.kind ? ` (${esc(entry.kind)})` : "";
+  return `<div class="filter-entry" data-filter-row data-category="${esc(group.category)}" data-name="${esc(entry.name)}" data-used="${entry.used_by}" data-children="${entry.child_count ?? 0}"${id}>
+    <div>
+      ${where}
+      <input type="text" value="${esc(entry.name)}" aria-label="${esc(group.label)} ${esc(entry.name)}" />
+    </div>
+    <span class="used">${entry.used_by} in use${kind}</span>
+    <button type="button" data-rename>Rename</button>
+    <button class="danger" type="button" data-delete-filter>Delete</button>
+  </div>`;
+}
+
+async function changeFilter(action: () => Promise<unknown>): Promise<void> {
+  try {
+    await action();
+    filterSay("");
+    await reloadFilterEditor();
+  } catch (error) {
+    filterSay(error instanceof Error ? error.message : "Could not update filters.");
+  }
+}
+
 function renderEditor(locations: Location[], facets: Facets): void {
   const current = editing;
   must<HTMLHeadingElement>("#editor-title").textContent = current ? `Edit ${current.name}` : "Add a miniature";
@@ -379,7 +593,11 @@ function renderEditor(locations: Location[], facets: Facets): void {
       return `<option value="${location.id}" ${selected}>${esc(location.path)}</option>`;
     })
     .join("");
-  const combatValues = [...new Set([...COMBAT, ...facets.combat, ...(current?.combat ?? [])])].sort();
+  const combatValues = uniqueTags([
+    ...(current?.combat ?? []),
+    ...facets.combat,
+    ...COMBAT,
+  ]).sort();
   must<HTMLFormElement>("#mini-form").innerHTML = `
     <div class="row">
       <label>Name<input name="name" type="text" required value="${esc(current?.name ?? "")}" /></label>
@@ -389,9 +607,9 @@ function renderEditor(locations: Location[], facets: Facets): void {
     </div>
     <label class="block">Notes<textarea name="notes">${esc(current?.notes ?? "")}</textarea></label>
     <label class="block">Stored in<select name="location_id" required>${locationOptions || `<option value="">Add a location first</option>`}</select></label>
-    <div class="row">
+    <div class="row tags">
       <div><label class="block">Race / type</label>${checks("edit-race", facets.races, current?.races ?? [])}<input name="extra-race" type="text" placeholder="add more, comma separated" /></div>
-      <div><label class="block">Combat</label>${checks("edit-combat", combatValues, current?.combat ?? [])}</div>
+      <div><label class="block">Combat</label>${checks("edit-combat", combatValues, current?.combat ?? [])}<input name="extra-combat" type="text" placeholder="add more, comma separated" /></div>
       <div><label class="block">Can stand in as</label>${checks("edit-role", facets.roles, current?.roles ?? [])}<input name="extra-role" type="text" placeholder="wizard, mage" /></div>
     </div>
     <div class="row">
@@ -648,7 +866,7 @@ must<HTMLFormElement>("#mini-form").addEventListener("submit", (event) => {
     location_id: Number(locationRaw),
     races: [...checked("edit-race"), ...splitExtra(String(data.get("extra-race") ?? ""))],
     roles: [...checked("edit-role"), ...splitExtra(String(data.get("extra-role") ?? ""))],
-    combat: checked("edit-combat"),
+    combat: [...checked("edit-combat"), ...splitExtra(String(data.get("extra-combat") ?? ""))],
   };
   const file = data.get("file");
   const drive = String(data.get("drive") ?? "").trim();
