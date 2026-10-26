@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS miniature_tags (
     PRIMARY KEY (miniature_id, tag_id)
 );
 
+CREATE TABLE IF NOT EXISTS facet_terms (
+    id INTEGER PRIMARY KEY,
+    category TEXT NOT NULL CHECK (category IN ('size', 'game')),
+    name TEXT NOT NULL,
+    UNIQUE (category, name)
+);
+
 CREATE TABLE IF NOT EXISTS api_keys (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
