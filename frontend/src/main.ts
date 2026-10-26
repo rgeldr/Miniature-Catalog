@@ -18,9 +18,21 @@ if (!app) throw new Error("missing app root");
 
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
 let editing: Miniature | null = null;
+let locationsCache: Location[] = [];
+let facetsCache: Facets | null = null;
+let returnFocus: HTMLElement | null = null;
+let restoreFocus = true;
 const thumbs = new Map<number, string>();
 
 app.innerHTML = `
+  <nav class="menubar" role="menubar" aria-label="Main">
+    <button id="file-menu-button" type="button" role="menuitem" aria-haspopup="menu" aria-expanded="false" aria-controls="file-menu">File</button>
+    <div id="file-menu" class="menu" role="menu" aria-labelledby="file-menu-button" hidden>
+      <button id="menu-add" type="button" role="menuitem">Add a miniature</button>
+      <button id="menu-storage" type="button" role="menuitem">Storage</button>
+      <button id="menu-encounter" type="button" role="menuitem">Encounter generator</button>
+    </div>
+  </nav>
   <header>
     <div>
       <h1>Miniature Catalog</h1>
@@ -50,17 +62,28 @@ app.innerHTML = `
       <h2>Figures</h2>
       <div id="results" class="results"></div>
     </section>
-    <section class="panel wide">
+  </main>
+  <dialog id="mini-dialog" aria-labelledby="editor-title">
+    <div class="dialog-head">
       <h2 id="editor-title">Add a miniature</h2>
-      <form id="mini-form" class="stack"></form>
-    </section>
-    <section class="panel wide">
-      <h2>Storage</h2>
-      <form id="location-form" class="row"></form>
-      <div id="report"></div>
-    </section>
-    <section class="panel wide stack" id="desktop-panel" hidden>
-      <h2>Encounter generator</h2>
+      <button id="mini-close" class="quiet" type="button">Close</button>
+    </div>
+    <form id="mini-form" class="stack"></form>
+  </dialog>
+  <dialog id="storage-dialog" aria-labelledby="storage-title">
+    <div class="dialog-head">
+      <h2 id="storage-title">Storage</h2>
+      <button id="storage-close" class="quiet" type="button">Close</button>
+    </div>
+    <form id="location-form" class="row"></form>
+    <div id="report"></div>
+  </dialog>
+  <dialog id="encounter-dialog" aria-labelledby="encounter-title">
+    <div class="dialog-head">
+      <h2 id="encounter-title">Encounter generator</h2>
+      <button id="encounter-close" class="quiet" type="button">Close</button>
+    </div>
+    <div class="stack" id="desktop-panel" hidden>
       <p class="empty">This window is the catalog. The generator calls a separate HTTP port on this computer, and only while that API is turned on.</p>
       <label class="block">Admin token</label>
       <div class="secret" id="admin-token"></div>
@@ -75,21 +98,42 @@ app.innerHTML = `
         <p id="api-status" class="empty"></p>
         <div><button type="submit">Save API settings</button></div>
       </form>
-    </section>
-    <section class="panel wide">
-      <h2>API keys</h2>
-      <p class="empty">Create a read key for the encounter generator. The token is shown once.</p>
-      <form id="key-form" class="row"></form>
-      <div id="new-key"></div>
-      <div id="keys"></div>
-    </section>
-  </main>
+    </div>
+    <h3>API keys</h3>
+    <p class="empty">Create a read key for the encounter generator. The token is shown once.</p>
+    <form id="key-form" class="row"></form>
+    <div id="new-key"></div>
+    <div id="keys"></div>
+  </dialog>
 `;
 
 paintThemeToggle();
 must<HTMLButtonElement>("#theme-toggle").addEventListener("click", () => {
   applyTheme(currentTheme() === "dark" ? "light" : "dark", true);
   paintThemeToggle();
+});
+
+const fileButton = must<HTMLButtonElement>("#file-menu-button");
+const fileMenu = must<HTMLDivElement>("#file-menu");
+wireMenu();
+for (const dialog of Array.from(document.querySelectorAll<HTMLDialogElement>("dialog"))) wireDialog(dialog);
+must<HTMLButtonElement>("#menu-add").addEventListener("click", () => {
+  openMiniature(null);
+});
+must<HTMLButtonElement>("#menu-storage").addEventListener("click", () => {
+  showDialog(must<HTMLDialogElement>("#storage-dialog"), "#location-form input[name=name]");
+});
+must<HTMLButtonElement>("#menu-encounter").addEventListener("click", () => {
+  showDialog(must<HTMLDialogElement>("#encounter-dialog"), "#encounter-close");
+});
+must<HTMLButtonElement>("#mini-close").addEventListener("click", () => {
+  must<HTMLDialogElement>("#mini-dialog").close();
+});
+must<HTMLButtonElement>("#storage-close").addEventListener("click", () => {
+  must<HTMLDialogElement>("#storage-dialog").close();
+});
+must<HTMLButtonElement>("#encounter-close").addEventListener("click", () => {
+  must<HTMLDialogElement>("#encounter-dialog").close();
 });
 
 function paintThemeToggle(): void {
@@ -107,6 +151,130 @@ function must<T extends Element>(selector: string): T {
   const node = document.querySelector<T>(selector);
   if (!node) throw new Error(`missing ${selector}`);
   return node;
+}
+
+function focusable(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>("button, input, select, textarea, a[href]")).filter(
+    (el) => !el.hasAttribute("disabled") && el.tabIndex !== -1 && !el.closest("[hidden]"),
+  );
+}
+
+function openFileMenu(): void {
+  fileMenu.hidden = false;
+  fileButton.setAttribute("aria-expanded", "true");
+  fileMenu.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
+}
+
+function closeFileMenu(focusButton = false): void {
+  fileMenu.hidden = true;
+  fileButton.setAttribute("aria-expanded", "false");
+  if (focusButton) fileButton.focus();
+}
+
+function wireMenu(): void {
+  fileButton.addEventListener("click", () => {
+    if (fileMenu.hidden) openFileMenu();
+    else closeFileMenu();
+  });
+  fileButton.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openFileMenu();
+    }
+  });
+  fileMenu.addEventListener("keydown", (event) => {
+    const items = Array.from(fileMenu.querySelectorAll<HTMLButtonElement>("[role=menuitem]"));
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeFileMenu(true);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      items[(index + 1) % items.length]?.focus();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      items[(index - 1 + items.length) % items.length]?.focus();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      items[0]?.focus();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      items[items.length - 1]?.focus();
+    } else if (event.key === "Tab") {
+      closeFileMenu();
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (fileMenu.hidden) return;
+    const target = event.target;
+    if (target instanceof Node && (fileButton.contains(target) || fileMenu.contains(target))) return;
+    closeFileMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "f") {
+      if (document.querySelector("dialog[open]")) return;
+      event.preventDefault();
+      fileButton.focus();
+      openFileMenu();
+    }
+  });
+}
+
+function showDialog(dialog: HTMLDialogElement, focusSelector: string): void {
+  returnFocus = fileButton;
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && !fileMenu.contains(active)) returnFocus = active;
+  closeFileMenu();
+  restoreFocus = false;
+  for (const other of Array.from(document.querySelectorAll<HTMLDialogElement>("dialog[open]"))) {
+    if (other !== dialog) other.close();
+  }
+  restoreFocus = true;
+  if (!dialog.open) dialog.showModal();
+  const preferred = dialog.querySelector<HTMLElement>(focusSelector);
+  (preferred ?? focusable(dialog)[0])?.focus();
+}
+
+function wireDialog(dialog: HTMLDialogElement): void {
+  dialog.addEventListener("click", (event) => {
+    if (event.target !== dialog) return;
+    const rect = dialog.getBoundingClientRect();
+    const outside =
+      event.clientX < rect.left ||
+      event.clientX > rect.right ||
+      event.clientY < rect.top ||
+      event.clientY > rect.bottom;
+    if (outside) dialog.close();
+  });
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    dialog.close();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const items = focusable(dialog);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (!restoreFocus) return;
+    if (returnFocus && document.contains(returnFocus)) returnFocus.focus();
+  });
+}
+
+function openMiniature(mini: Miniature | null): void {
+  editing = mini;
+  if (facetsCache) renderEditor(locationsCache, facetsCache);
+  showDialog(must<HTMLDialogElement>("#mini-dialog"), "#mini-form input[name=name]");
 }
 
 function esc(value: string): string {
@@ -249,6 +417,7 @@ function renderEditor(locations: Location[], facets: Facets): void {
       .then(() => {
         thumbs.delete(current.id);
         editing = null;
+        must<HTMLDialogElement>("#mini-dialog").close();
         say(`Deleted ${current.name}.`);
         return refresh();
       })
@@ -394,10 +563,7 @@ async function showResults(miniatures: Miniature[]): Promise<void> {
   );
   host.querySelectorAll<HTMLButtonElement>("[data-edit]").forEach((button) => {
     button.addEventListener("click", () => {
-      editing = miniatures.find((mini) => mini.id === Number(button.dataset.edit)) ?? null;
-      void refresh()
-        .then(() => document.querySelector("#editor-title")?.scrollIntoView({ behavior: "smooth" }))
-        .catch((error: Error) => say(error.message));
+      openMiniature(miniatures.find((mini) => mini.id === Number(button.dataset.edit)) ?? null);
     });
   });
 }
@@ -429,6 +595,8 @@ async function refresh(): Promise<void> {
     client.report(),
     client.miniatures(queryFromFilters()),
   ]);
+  locationsCache = locations.locations;
+  facetsCache = facets;
   renderFilters(facets, locations.locations);
   renderEditor(locations.locations, facets);
   renderLocationForm(locations.locations);
@@ -500,6 +668,7 @@ must<HTMLFormElement>("#mini-form").addEventListener("submit", (event) => {
         thumbs.delete(mini.id);
       }
       editing = null;
+      must<HTMLDialogElement>("#mini-dialog").close();
       say(`Saved ${mini.name}.`);
       await refresh();
     })
