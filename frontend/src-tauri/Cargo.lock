@@ -2065,7 +2065,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "miniature-catalog"
-version = "0.1.0"
+version = "26.10.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "miniature-catalog-desktop"
-version = "0.1.0"
+version = "26.10.1"
 dependencies = [
  "miniature-catalog",
  "tauri",

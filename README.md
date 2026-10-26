@@ -24,14 +24,16 @@ npm run tauri dev
 
 That builds the UI and opens the Miniature Catalog window.
 
-A release installer:
+A release build, from the repo root:
 
 ```powershell
-cd D:\GitHub\Miniature-Catalog\frontend
-npm run tauri build
+cd D:\GitHub\Miniature-Catalog
+npm run release
 ```
 
-The Windows setup program is written under `frontend\src-tauri\target\release\bundle\nsis\`. An MSI is written under `bundle\msi\` when that bundler runs.
+That checks the version, then builds the desktop app. It does not create a git tag or a GitHub release. See [Version and release](#version-and-release).
+
+The Windows setup program is written under `frontend\src-tauri\target\release\bundle\nsis\`. An MSI is written under `bundle\msi\` when that bundler runs. `npm run tauri build` from `frontend` still builds those installers on its own.
 
 No OpenSSL, no `export`, and no bash.
 
@@ -71,7 +73,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/api-keys `
 
 ## Other systems
 
-The same two commands, from `frontend`:
+The same development commands, from `frontend`:
 
 ```bash
 npm install
@@ -79,11 +81,46 @@ npm run tauri dev
 npm run tauri build
 ```
 
+`npm run version:bump` and `npm run release` run from the repo root on every system. See [Version and release](#version-and-release).
+
 Linux needs the WebKitGTK libraries Tauri links against. On Linux the data folder is `~/.local/share/miniaturecatalog`. On macOS it is under `~/Library/Application Support/`.
+
+## Version and release
+
+Versions are `YY.MM.N` (for example `26.10.1`). The same number is written in every place the app records its version:
+
+- `package.json` and `package-lock.json`
+- `frontend/package.json` and `frontend/package-lock.json`
+- `Cargo.toml` and `Cargo.lock` (`miniature-catalog`)
+- `frontend/src-tauri/Cargo.toml` and `frontend/src-tauri/Cargo.lock` (`miniature-catalog` and `miniature-catalog-desktop`)
+- `frontend/src-tauri/tauri.conf.json`
+
+`openapi.yaml` stays on its own version. That field is the HTTP API contract, not the desktop release.
+
+From the repo root in PowerShell:
+
+```powershell
+npm run version:check
+npm run version:bump
+npm test
+```
+
+`npm run version:check` fails unless `YY.MM` is the current month. `npm run version:bump` adds one to `N` in the current month, or starts at `.1` when the month changes. `npm test` runs `scripts/version.test.mjs`. The same bump and check commands are `node scripts/version.mjs bump` and `node scripts/version.mjs check`.
+
+`26.10.1` is a valid semver. A January version written as `26.01.1` is not, because of the leading zero. `npm run tauri build` runs `npm run version:check` before it compiles, so a stale month fails the build.
+
+```powershell
+npm run release
+```
+
+`npm run release` is the Tauri build, run from the repo root. The version check runs first, then the desktop app is built. It does not create a git tag, push, or publish a GitHub release. On Windows the installer is `frontend\src-tauri\target\release\bundle\nsis\Miniature Catalog_<version>_x64-setup.exe`. The executable is `frontend\src-tauri\target\release\miniature-catalog-desktop.exe`.
+
+This app does not check for updates. There is no signing key and no `latest.json`.
 
 ## Tests
 
 ```powershell
+npm test
 cargo test
 cd frontend
 npm run typecheck

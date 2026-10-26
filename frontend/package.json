@@ -1,6 +1,7 @@
 {
   "name": "miniature-catalog-ui",
   "private": true,
+  "version": "26.10.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

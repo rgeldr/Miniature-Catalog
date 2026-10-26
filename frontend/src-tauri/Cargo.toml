@@ -1,6 +1,6 @@
 [package]
 name = "miniature-catalog-desktop"
-version = "0.1.0"
+version = "26.10.1"
 description = "Desktop window for the miniature catalog"
 edition = "2021"
 publish = false

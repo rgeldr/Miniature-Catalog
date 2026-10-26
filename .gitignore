@@ -19,7 +19,7 @@ rustc-ice-*.txt
 # App data and the built catalog UI
 /data
 *.db
-frontend/node_modules
+node_modules
 frontend/dist
 
 # RustRover

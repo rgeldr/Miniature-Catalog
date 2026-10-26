@@ -1,0 +1,12 @@
+{
+  "name": "miniature-catalog",
+  "private": true,
+  "version": "26.10.1",
+  "type": "module",
+  "scripts": {
+    "version:check": "node scripts/version.mjs check",
+    "version:bump": "node scripts/version.mjs bump",
+    "test": "node scripts/version.test.mjs",
+    "release": "npm --prefix frontend run tauri -- build"
+  }
+}
