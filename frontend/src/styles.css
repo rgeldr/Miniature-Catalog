@@ -382,6 +382,10 @@ dialog h3 {
 
 dialog .stack { margin-top: 0.35rem; }
 .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: end; }
+.row.tags { align-items: stretch; }
+.row.tags > div { display: flex; flex-direction: column; }
+.row.tags .checks,
+.row.tags .empty { flex: 1; }
 .row > * { flex: 1; min-width: 8rem; }
 .row button { flex: 0; }
 

@@ -795,6 +795,18 @@ fn replace_tags(conn: &Connection, miniature_id: i64, mini: &NewMiniature) -> Re
 }
 
 fn ensure_tag(conn: &Connection, category: &str, name: &str) -> Result<i64, DbError> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM tags
+             WHERE category = ?1 AND name = ?2 COLLATE NOCASE
+             ORDER BY id LIMIT 1",
+            params![category, name],
+            |row| row.get(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
     conn.execute(
         "INSERT INTO tags (category, name) VALUES (?1, ?2)
          ON CONFLICT(category, name) DO NOTHING",
@@ -1024,9 +1036,9 @@ fn clean_location_name(value: &str) -> Result<String, DbError> {
 }
 
 fn normalize_tags(values: &[String]) -> Result<Vec<String>, DbError> {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     for value in values {
-        let name = value.trim().to_lowercase();
+        let name = value.trim();
         if name.is_empty() {
             continue;
         }
@@ -1041,9 +1053,13 @@ fn normalize_tags(values: &[String]) -> Result<Vec<String>, DbError> {
                 "tag \"{name}\" has unsupported characters"
             )));
         }
-        if !out.contains(&name) {
-            out.push(name);
+        if out
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            continue;
         }
+        out.push(name.to_string());
     }
     if out.len() > 20 {
         return Err(DbError::Invalid("too many tags in one category".into()));
@@ -1155,5 +1171,150 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, DbError::Invalid(_)));
+    }
+
+    fn desk(conn: &Connection) -> i64 {
+        create_location(
+            conn,
+            NewLocation {
+                name: "Desk".into(),
+                kind: "room".into(),
+                parent_id: None,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    fn mini(
+        location_id: i64,
+        races: Vec<String>,
+        roles: Vec<String>,
+        combat: Vec<String>,
+    ) -> NewMiniature {
+        NewMiniature {
+            name: "Hero".into(),
+            notes: String::new(),
+            quantity: 1,
+            size: "28mm".into(),
+            game: None,
+            location_id,
+            races,
+            roles,
+            combat,
+        }
+    }
+
+    #[test]
+    fn tags_keep_the_case_that_was_entered() {
+        let conn = conn();
+        let location_id = desk(&conn);
+        let created = create_miniature(
+            &conn,
+            mini(
+                location_id,
+                vec!["Orc".into()],
+                vec!["Mage".into()],
+                vec!["Magic and Melee".into()],
+            ),
+        )
+        .unwrap();
+        assert_eq!(created.races, vec!["Orc"]);
+        assert_eq!(created.roles, vec!["Mage"]);
+        assert_eq!(created.combat, vec!["Magic and Melee"]);
+
+        let tag = create_tag(&conn, "race", "Goblin").unwrap();
+        assert_eq!(tag.name, "Goblin");
+    }
+
+    #[test]
+    fn tag_dedupe_is_case_insensitive_and_keeps_the_first_spelling() {
+        let conn = conn();
+        let location_id = desk(&conn);
+        let first = create_miniature(
+            &conn,
+            mini(
+                location_id,
+                vec!["Orc".into(), " orc ".into(), "ORC".into()],
+                vec!["Mage".into()],
+                vec!["Ranged".into()],
+            ),
+        )
+        .unwrap();
+        assert_eq!(first.races, vec!["Orc"]);
+        assert_eq!(first.combat, vec!["Ranged"]);
+
+        let second = create_miniature(
+            &conn,
+            mini(
+                location_id,
+                vec!["orc".into()],
+                vec!["mage".into()],
+                vec!["ranged".into()],
+            ),
+        )
+        .unwrap();
+        assert_eq!(second.races, vec!["Orc"]);
+        assert_eq!(second.roles, vec!["Mage"]);
+        assert_eq!(second.combat, vec!["Ranged"]);
+
+        let updated = update_miniature(
+            &conn,
+            first.id,
+            validate_miniature(mini(
+                location_id,
+                vec!["orc".into(), "Elf".into()],
+                vec!["Mage".into()],
+                vec!["RANGED".into()],
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(updated.races.len(), 2);
+        assert!(updated.races.iter().any(|race| race == "Orc"));
+        assert!(updated.races.iter().any(|race| race == "Elf"));
+        assert_eq!(updated.combat, vec!["Ranged"]);
+
+        let found = list_miniatures(
+            &conn,
+            &MiniFilter {
+                races: vec!["orc".into()],
+                combat: vec!["RANGED".into()],
+                ..MiniFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(found.len(), 2);
+
+        let race_tags: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE category = 'race' AND name = 'orc' COLLATE NOCASE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(race_tags, 1);
+        let all_races: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE category = 'race'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(all_races, 2);
+        let orc: String = conn
+            .query_row(
+                "SELECT name FROM tags WHERE category = 'race' AND name = 'orc' COLLATE NOCASE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orc, "Orc");
+
+        let original = create_tag(&conn, "race", "Goblin").unwrap();
+        let again = create_tag(&conn, "race", "goblin").unwrap();
+        assert_eq!(again.id, original.id);
+        assert_eq!(original.name, "Goblin");
+        assert_eq!(again.name, "Goblin");
     }
 }

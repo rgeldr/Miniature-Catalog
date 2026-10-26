@@ -306,6 +306,16 @@ function splitExtra(value: string): string[] {
     .filter(Boolean);
 }
 
+function uniqueTags(values: string[]): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    if (!out.some((existing) => existing.toLowerCase() === value.toLowerCase())) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+
 function queryFromFilters(): string {
   const params = new URLSearchParams();
   const q = must<HTMLInputElement>("#q").value.trim();
@@ -330,7 +340,7 @@ function checks(name: string, values: string[], selected: string[]): string {
   if (!values.length) return `<p class="empty">None yet.</p>`;
   return `<div class="checks">${values
     .map((value) => {
-      const on = selected.includes(value) ? "checked" : "";
+      const on = selected.some((item) => item.toLowerCase() === value.toLowerCase()) ? "checked" : "";
       return `<label><input type="checkbox" name="${esc(name)}" value="${esc(value)}" ${on} /> ${esc(value)}</label>`;
     })
     .join("")}</div>`;
@@ -345,7 +355,7 @@ function renderFilters(facets: Facets, locations: Location[]): void {
     game: checked("game"),
     location: checked("location"),
   };
-  const combat = [...new Set([...COMBAT, ...facets.combat])].sort();
+  const combat = uniqueTags([...facets.combat, ...COMBAT]).sort();
   const locationChecks = locations.length
     ? `<div class="checks">${locations
         .map((location) => {
@@ -379,7 +389,11 @@ function renderEditor(locations: Location[], facets: Facets): void {
       return `<option value="${location.id}" ${selected}>${esc(location.path)}</option>`;
     })
     .join("");
-  const combatValues = [...new Set([...COMBAT, ...facets.combat, ...(current?.combat ?? [])])].sort();
+  const combatValues = uniqueTags([
+    ...(current?.combat ?? []),
+    ...facets.combat,
+    ...COMBAT,
+  ]).sort();
   must<HTMLFormElement>("#mini-form").innerHTML = `
     <div class="row">
       <label>Name<input name="name" type="text" required value="${esc(current?.name ?? "")}" /></label>
@@ -389,9 +403,9 @@ function renderEditor(locations: Location[], facets: Facets): void {
     </div>
     <label class="block">Notes<textarea name="notes">${esc(current?.notes ?? "")}</textarea></label>
     <label class="block">Stored in<select name="location_id" required>${locationOptions || `<option value="">Add a location first</option>`}</select></label>
-    <div class="row">
+    <div class="row tags">
       <div><label class="block">Race / type</label>${checks("edit-race", facets.races, current?.races ?? [])}<input name="extra-race" type="text" placeholder="add more, comma separated" /></div>
-      <div><label class="block">Combat</label>${checks("edit-combat", combatValues, current?.combat ?? [])}</div>
+      <div><label class="block">Combat</label>${checks("edit-combat", combatValues, current?.combat ?? [])}<input name="extra-combat" type="text" placeholder="add more, comma separated" /></div>
       <div><label class="block">Can stand in as</label>${checks("edit-role", facets.roles, current?.roles ?? [])}<input name="extra-role" type="text" placeholder="wizard, mage" /></div>
     </div>
     <div class="row">
@@ -648,7 +662,7 @@ must<HTMLFormElement>("#mini-form").addEventListener("submit", (event) => {
     location_id: Number(locationRaw),
     races: [...checked("edit-race"), ...splitExtra(String(data.get("extra-race") ?? ""))],
     roles: [...checked("edit-role"), ...splitExtra(String(data.get("extra-role") ?? ""))],
-    combat: checked("edit-combat"),
+    combat: [...checked("edit-combat"), ...splitExtra(String(data.get("extra-combat") ?? ""))],
   };
   const file = data.get("file");
   const drive = String(data.get("drive") ?? "").trim();
