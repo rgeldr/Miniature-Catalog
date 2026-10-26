@@ -1,0 +1,27 @@
+[package]
+name = "miniature-catalog"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted catalog of tabletop miniatures and the storage location of each one"
+publish = false
+
+[dependencies]
+axum = { version = "0.7.9", features = ["multipart"] }
+base64 = "0.22"
+getrandom = "0.2"
+directories = "5"
+hex = "0.4"
+http = "1"
+image = { version = "0.25.5", default-features = false, features = ["jpeg", "png", "gif"] }
+reqwest = { version = "0.12.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tower-http = { version = "0.6.2", features = ["cors", "set-header"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
