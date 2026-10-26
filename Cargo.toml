@@ -1,6 +1,6 @@
 [package]
 name = "miniature-catalog"
-version = "0.1.0"
+version = "26.10.1"
 edition = "2021"
 description = "Self-hosted catalog of tabletop miniatures and the storage location of each one"
 publish = false
