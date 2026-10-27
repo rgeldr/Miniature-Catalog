@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use miniature_catalog::{
     listen_for_ui, load_or_create_admin_token, load_settings, resolve_data_dir, ApiHost, AppState,
     Settings,
