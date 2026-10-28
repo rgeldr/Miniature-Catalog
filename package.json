@@ -6,8 +6,8 @@
   "scripts": {
     "version:check": "node scripts/version.mjs check",
     "version:bump": "node scripts/version.mjs bump",
-    "test": "node scripts/version.test.mjs",
-    "release": "npm --prefix frontend run tauri -- build"
+    "test": "node scripts/version.test.mjs && node scripts/exit.test.mjs && node scripts/frontend-deps.test.mjs",
+    "release": "npm install --prefix frontend && npm --prefix frontend run tauri -- build"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
