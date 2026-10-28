@@ -102,3 +102,39 @@ fn resolve_static(app: &tauri::App) -> Result<PathBuf, String> {
             "could not find the catalog UI. From the frontend folder run npm run build.".into()
         })
 }
+
+#[cfg(test)]
+mod exit_capability {
+    use std::path::PathBuf;
+    use tauri::utils::acl::capability::CapabilityFile;
+    use tauri::utils::acl::RemoteUrlPattern;
+
+    #[test]
+    fn exit_may_close_only_the_local_catalog_origin() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
+        let CapabilityFile::Capability(capability) =
+            CapabilityFile::load(&path).expect("capability file")
+        else {
+            panic!("expected one capability");
+        };
+        assert!(
+            capability
+                .permissions
+                .iter()
+                .any(|entry| entry.identifier().get() == "core:window:allow-close"),
+            "Exit calls plugin:window|close, which is not in the default window permissions"
+        );
+        let urls = capability
+            .remote
+            .as_ref()
+            .expect("the catalog page is a remote URL")
+            .urls
+            .clone();
+        assert_eq!(urls, vec!["http://127.0.0.1:*/*".to_string()]);
+        let pattern: RemoteUrlPattern = urls[0].parse().expect("url pattern");
+        assert!(pattern.test(&"http://127.0.0.1:8094/".parse().unwrap()));
+        assert!(pattern.test(&"http://127.0.0.1:1420/index.html".parse().unwrap()));
+        assert!(!pattern.test(&"http://example.com/".parse().unwrap()));
+        assert!(!pattern.test(&"https://127.0.0.1:8094/".parse().unwrap()));
+    }
+}

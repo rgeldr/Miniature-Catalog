@@ -1,6 +1,9 @@
 {
   "identifier": "default",
-  "description": "The window loads the local catalog UI over HTTP and does not use Tauri commands.",
+  "description": "Lets File → Exit close the catalog window. The page is served on 127.0.0.1, so that origin is the only remote page allowed to call the close command.",
   "windows": ["main"],
-  "permissions": []
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*"]
+  },
+  "permissions": ["core:window:allow-close"]
 }

@@ -31,7 +31,7 @@ cd D:\GitHub\Miniature-Catalog
 npm run release
 ```
 
-That checks the version, then builds the desktop app. It does not create a git tag or a GitHub release. See [Version and release](#version-and-release). A release build does not open a command prompt, `npm run tauri dev` still prints into the terminal that started it, and `cargo run` from the repo root still keeps its console.
+That installs the frontend packages (including `@tauri-apps/api`, which File → Exit imports), checks the version, then builds the desktop app. It does not create a git tag or a GitHub release. See [Version and release](#version-and-release). A release build does not open a command prompt, `npm run tauri dev` still prints into the terminal that started it, and `cargo run` from the repo root still keeps its console.
 
 The Windows setup program is written under `frontend\src-tauri\target\release\bundle\nsis\`. An MSI is written under `bundle\msi\` when that bundler runs. `npm run tauri build` from `frontend` still builds those installers on its own.
 

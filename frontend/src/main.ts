@@ -9,6 +9,7 @@ import {
   type Miniature,
 } from "./api";
 import { version } from "../package.json";
+import { requestExit } from "./desktop-exit";
 import { applyTheme, currentTheme, readTheme } from "./theme";
 
 applyTheme(readTheme(), false);
@@ -430,13 +431,15 @@ function wireDivider(): void {
 
 async function exitApp(): Promise<void> {
   closeMenus();
-  if (!("__TAURI_INTERNALS__" in window)) {
-    say("Close this browser tab to leave.");
-    return;
-  }
   try {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().close();
+    await requestExit({
+      inDesktop: "__TAURI_INTERNALS__" in window,
+      say,
+      closeWindow: async () => {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().close();
+      },
+    });
   } catch (error) {
     say(error instanceof Error ? error.message : "Could not close the window.");
   }
