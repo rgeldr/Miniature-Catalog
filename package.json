@@ -8,5 +8,8 @@
     "version:bump": "node scripts/version.mjs bump",
     "test": "node scripts/version.test.mjs",
     "release": "npm --prefix frontend run tauri -- build"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
   }
 }

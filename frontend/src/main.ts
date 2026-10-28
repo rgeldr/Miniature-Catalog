@@ -33,9 +33,12 @@ app.innerHTML = `
       <button id="file-menu-button" type="button" role="menuitem" aria-haspopup="menu" aria-expanded="false" aria-controls="file-menu">File</button>
       <div id="file-menu" class="menu" role="menu" aria-labelledby="file-menu-button" hidden>
         <button id="menu-add" type="button" role="menuitem">Add a miniature</button>
-        <button id="menu-storage" type="button" role="menuitem">Storage</button>
-        <button id="menu-encounter" type="button" role="menuitem">Encounter generator</button>
         <button id="menu-filters" type="button" role="menuitem">Edit filters</button>
+        <button id="menu-encounter" type="button" role="menuitem">Encounter generator</button>
+        <button id="menu-settings" type="button" role="menuitem">Settings</button>
+        <button id="menu-storage" type="button" role="menuitem">Storage</button>
+        <div class="menu-sep" role="separator"></div>
+        <button id="menu-exit" type="button" role="menuitem">Exit</button>
       </div>
     </div>
     <div class="menu-root">
@@ -46,17 +49,7 @@ app.innerHTML = `
     </div>
   </nav>
   <header>
-    <div>
-      <h1>Miniature Catalog</h1>
-      <p>Where each figure is, and which box to open.</p>
-    </div>
-    <div class="header-actions">
-      <button id="theme-toggle" class="theme-toggle" type="button"></button>
-      <form id="token-form" class="token">
-        <input id="token" type="password" placeholder="Admin or read token" autocomplete="current-password" />
-        <button type="submit">Save token</button>
-      </form>
-    </div>
+    <h1>Miniature Catalog</h1>
   </header>
   <div id="message"></div>
   <main>
@@ -64,15 +57,16 @@ app.innerHTML = `
       <h2>Filters</h2>
       <label class="block" for="q">Name</label>
       <input id="q" type="search" placeholder="wizard, orc warrior" />
-      <div id="filters"></div>
+      <div id="filters" class="panel-scroll"></div>
       <div class="row" style="margin-top:0.8rem">
         <button id="search" type="button">Search</button>
         <button id="clear" class="quiet" type="button">Clear</button>
       </div>
     </section>
+    <div id="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize filters" tabindex="0"></div>
     <section class="panel">
       <h2>Figures</h2>
-      <div id="results" class="results"></div>
+      <div id="results" class="results panel-scroll"></div>
     </section>
   </main>
   <dialog id="mini-dialog" aria-labelledby="editor-title">
@@ -134,6 +128,19 @@ app.innerHTML = `
     <p><strong>Miniature Catalog</strong></p>
     <p>Version <span id="about-version"></span></p>
   </dialog>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <div class="dialog-head">
+      <h2 id="settings-title">Settings</h2>
+      <button id="settings-close" class="quiet" type="button">Close</button>
+    </div>
+    <div class="stack">
+      <button id="theme-toggle" class="quiet" type="button"></button>
+      <form id="token-form" class="token">
+        <input id="token" type="password" placeholder="Admin or read token" autocomplete="current-password" />
+        <button type="submit">Save token</button>
+      </form>
+    </div>
+  </dialog>
 `;
 
 paintThemeToggle();
@@ -161,6 +168,12 @@ must<HTMLButtonElement>("#menu-encounter").addEventListener("click", () => {
 must<HTMLButtonElement>("#menu-filters").addEventListener("click", () => {
   void openFilters();
 });
+must<HTMLButtonElement>("#menu-settings").addEventListener("click", () => {
+  showDialog(must<HTMLDialogElement>("#settings-dialog"), "#theme-toggle");
+});
+must<HTMLButtonElement>("#menu-exit").addEventListener("click", () => {
+  void exitApp();
+});
 must<HTMLButtonElement>("#menu-about").addEventListener("click", () => {
   showDialog(must<HTMLDialogElement>("#about-dialog"), "#about-close");
 });
@@ -179,6 +192,10 @@ must<HTMLButtonElement>("#filter-close").addEventListener("click", () => {
 must<HTMLButtonElement>("#about-close").addEventListener("click", () => {
   must<HTMLDialogElement>("#about-dialog").close();
 });
+must<HTMLButtonElement>("#settings-close").addEventListener("click", () => {
+  must<HTMLDialogElement>("#settings-dialog").close();
+});
+wireDivider();
 
 function paintThemeToggle(): void {
   const button = must<HTMLButtonElement>("#theme-toggle");
@@ -287,6 +304,142 @@ function wireMenu(): void {
 function siblingMenu(menu: Menu, step: number): Menu {
   const index = menus.indexOf(menu);
   return menus[(index + step + menus.length) % menus.length];
+}
+
+const FILTERS_WIDTH_KEY = "mc.filtersWidth";
+
+function remPx(rem: number): number {
+  const root = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  return rem * root;
+}
+
+function readFiltersWidth(): number | null {
+  try {
+    const raw = localStorage.getItem(FILTERS_WIDTH_KEY);
+    if (raw === null) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeFiltersWidth(px: number): void {
+  try {
+    localStorage.setItem(FILTERS_WIDTH_KEY, String(Math.round(px)));
+  } catch {
+    /* private mode */
+  }
+}
+
+function filtersMax(): number {
+  return window.innerWidth / 2;
+}
+
+function clampFilters(px: number): number {
+  return Math.min(filtersMax(), Math.max(remPx(12), px));
+}
+
+function narrowLayout(): boolean {
+  return window.matchMedia("(max-width: 800px)").matches;
+}
+
+function shownFiltersWidth(): number {
+  const raw = getComputedStyle(must<HTMLElement>("main")).getPropertyValue("--filters-width");
+  const value = Number.parseFloat(raw);
+  if (Number.isFinite(value)) return value;
+  return clampFilters(readFiltersWidth() ?? remPx(18));
+}
+
+function applyShownWidth(px: number): void {
+  const handle = must<HTMLElement>("#pane-resize");
+  must<HTMLElement>("main").style.setProperty("--filters-width", `${px}px`);
+  handle.setAttribute("aria-valuemin", String(Math.round(remPx(12))));
+  handle.setAttribute("aria-valuemax", String(Math.round(filtersMax())));
+  handle.setAttribute("aria-valuenow", String(Math.round(px)));
+}
+
+function layoutFilters(): void {
+  const handle = must<HTMLElement>("#pane-resize");
+  const main = must<HTMLElement>("main");
+  if (narrowLayout()) {
+    main.style.removeProperty("--filters-width");
+    handle.hidden = true;
+    handle.tabIndex = -1;
+    return;
+  }
+  handle.hidden = false;
+  handle.tabIndex = 0;
+  const chosen = readFiltersWidth();
+  applyShownWidth(clampFilters(chosen ?? remPx(18)));
+}
+
+function commitFiltersWidth(px: number): void {
+  writeFiltersWidth(clampFilters(px));
+  layoutFilters();
+}
+
+function wireDivider(): void {
+  const handle = must<HTMLElement>("#pane-resize");
+  let dragging = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || narrowLayout()) return;
+    event.preventDefault();
+    dragging = true;
+    startX = event.clientX;
+    startWidth = shownFiltersWidth();
+    document.body.classList.add("resizing");
+  });
+  window.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    event.preventDefault();
+    applyShownWidth(clampFilters(startWidth + event.clientX - startX));
+  });
+  const finishDrag = (): void => {
+    if (!dragging) return;
+    const moved = Math.round(shownFiltersWidth()) !== Math.round(startWidth);
+    dragging = false;
+    document.body.classList.remove("resizing");
+    if (moved) writeFiltersWidth(shownFiltersWidth());
+    layoutFilters();
+  };
+  window.addEventListener("pointerup", finishDrag);
+  window.addEventListener("pointercancel", finishDrag);
+  handle.addEventListener("keydown", (event) => {
+    if (narrowLayout()) return;
+    const shown = shownFiltersWidth();
+    let next: number | null = null;
+    if (event.key === "ArrowLeft") next = shown - 16;
+    else if (event.key === "ArrowRight") next = shown + 16;
+    else if (event.key === "Home") next = remPx(12);
+    else if (event.key === "End") next = filtersMax();
+    else return;
+    event.preventDefault();
+    const clamped = clampFilters(next);
+    if (event.key !== "Home" && event.key !== "End" && Math.round(clamped) === Math.round(shown)) return;
+    commitFiltersWidth(clamped);
+  });
+  window.addEventListener("resize", () => {
+    if (!dragging) layoutFilters();
+  });
+  layoutFilters();
+}
+
+async function exitApp(): Promise<void> {
+  closeMenus();
+  if (!("__TAURI_INTERNALS__" in window)) {
+    say("Close this browser tab to leave.");
+    return;
+  }
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().close();
+  } catch (error) {
+    say(error instanceof Error ? error.message : "Could not close the window.");
+  }
 }
 
 function showDialog(dialog: HTMLDialogElement, focusSelector: string): void {

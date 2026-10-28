@@ -88,12 +88,24 @@
 
 * { box-sizing: border-box; }
 
+html { height: 100%; }
+
 body {
   margin: 0;
+  height: 100%;
+  height: 100dvh;
+  overflow: hidden;
   color: var(--color-text);
   background-color: var(--color-bg-app);
   background-image: radial-gradient(circle at top left, var(--color-bg-glow), transparent 28rem);
   font-family: var(--font-ui);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 button, input, select, textarea {
@@ -193,11 +205,14 @@ textarea:focus-visible {
   background: var(--color-bg-input);
 }
 
+.menu-sep {
+  height: 0;
+  margin: 0.3rem 0.4rem;
+  border-top: 1px solid var(--color-border);
+}
+
 header {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  align-items: end;
+  flex: 0 0 auto;
   padding: 1.25rem 1.5rem 1rem;
   background: var(--color-bg-header);
   color: var(--color-text-header);
@@ -212,63 +227,81 @@ header h1 {
   letter-spacing: -0.03em;
 }
 
-header p { margin: 0.2rem 0 0; color: var(--color-text-header-muted); }
-
-.header-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.55rem;
-}
-
-.theme-toggle {
-  background: transparent;
-  color: var(--color-text-header);
-  border: 1px solid var(--color-border-header-input);
-}
-
-header button:focus-visible,
-header input:focus-visible {
-  outline-color: var(--color-text-header);
-}
-
 .token {
   display: flex;
   gap: 0.4rem;
   align-items: center;
 }
 
-header input[type="password"] {
-  width: auto;
-  background: var(--color-bg-header-input);
-  border: 1px solid var(--color-border-header-input);
-  border-radius: 999px;
-  padding: 0.45rem 0.8rem;
-  min-width: 16rem;
-  color: var(--color-text-header);
-}
-
-header input::placeholder { color: var(--color-text-header-muted); }
+dialog .token { margin-top: 0.85rem; }
+dialog .token input { min-width: 0; }
 
 #message {
+  flex: 0 0 auto;
+  max-height: 4.5rem;
+  overflow: auto;
   min-height: 1.2rem;
   margin: 0.75rem 1.5rem 0;
   color: var(--color-warn);
 }
 
+.menubar { flex: 0 0 auto; }
+
 main {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
   display: grid;
-  grid-template-columns: 18rem 1fr;
-  gap: 1rem;
-  padding: 1rem 1.5rem 2rem;
+  grid-template-columns: var(--filters-width, 18rem) 0.7rem minmax(0, 1fr);
+  gap: 0;
+  padding: 1rem 1.5rem 1rem;
 }
 
 .panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   background: var(--color-bg-sidebar);
   border: 1px solid var(--color-border);
   border-radius: 1rem;
   padding: 0.9rem;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel > :not(.panel-scroll) { flex: 0 0 auto; }
+
+.panel-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+#pane-resize {
+  cursor: col-resize;
+  touch-action: none;
+  position: relative;
+}
+
+#pane-resize::before {
+  content: "";
+  position: absolute;
+  top: 0.4rem;
+  bottom: 0.4rem;
+  left: 50%;
+  width: 1px;
+  background: var(--color-border);
+}
+
+#pane-resize:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+body.resizing, body.resizing * {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .panel h2 {
@@ -284,7 +317,7 @@ main {
   font-size: 0.85rem;
 }
 
-.checks { display: flex; flex-direction: column; gap: 0.2rem; max-height: 9rem; overflow: auto; }
+.checks { display: flex; flex-direction: column; gap: 0.2rem; }
 .checks label { display: flex; gap: 0.4rem; align-items: center; }
 
 input[type="checkbox"] { accent-color: var(--color-accent); }
@@ -308,7 +341,12 @@ textarea::placeholder { color: var(--color-text-subtle); }
 
 textarea { min-height: 4.5rem; resize: vertical; }
 
-.results { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: 0.75rem; }
+.results {
+  display: grid;
+  align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.75rem;
+}
 
 .card {
   display: grid;
@@ -439,9 +477,14 @@ th { color: var(--color-text-muted); font-weight: 600; }
 @media (max-width: 800px) {
   dialog { width: calc(100vw - 1rem); padding: 0.8rem; }
   .dialog-head { align-items: flex-start; }
-  header, .token, .header-actions { flex-direction: column; align-items: stretch; }
-  .token input, header input { min-width: 0; }
-  main { grid-template-columns: 1fr; padding: 0.8rem; }
+  .token { flex-direction: column; align-items: stretch; }
+  .token input { min-width: 0; }
+  main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 40%) minmax(0, 1fr);
+    padding: 0.8rem;
+  }
+  #pane-resize { display: none; }
   .card { grid-template-columns: 4.5rem 1fr; }
   .filter-entry { grid-template-columns: minmax(0, 1fr); }
   .filter-entry button { width: 100%; }
