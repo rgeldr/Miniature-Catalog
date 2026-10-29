@@ -1,0 +1,16 @@
+---
+description: Run graph-coverage on changes before a pull request and test the gaps it finds.
+alwaysApply: true
+---
+
+Before opening or updating a pull request, run the graph-coverage skill at `.cursor/skills/graph-coverage` from the repository root. Use its command:
+
+```bash
+node .cursor/skills/graph-coverage/scripts/graph-coverage.mjs --summary --ts-root frontend/src --rust-root src --rust-root frontend/src-tauri/src --out "$TMPDIR/graph-coverage.json"
+```
+
+```powershell
+node .cursor\skills\graph-coverage\scripts\graph-coverage.mjs --summary --ts-root frontend/src --rust-root src --rust-root frontend/src-tauri/src --out "$env:TEMP\graph-coverage.json"
+```
+
+Include the findings in the PR description: coverage ratios, untested gaps in new or changed code, and blast radius. Add unit tests for the gaps it finds in the new and changed code, then re-run the skill to confirm. The analysis is static test linkage, not executed coverage. Follow the skill for how to read the report, and do not commit the JSON.
