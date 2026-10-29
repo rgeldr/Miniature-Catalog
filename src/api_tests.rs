@@ -471,6 +471,19 @@ async fn settings_default_off_and_reject_a_hostname() {
     assert_eq!(body["api_enabled"], false);
 }
 
+#[test]
+fn group_returns_the_named_category() {
+    let body = json!({
+        "groups": [
+            {"category": "race", "entries": [{"name": "orc"}]},
+            {"category": "size", "entries": []}
+        ]
+    });
+    assert_eq!(group(&body, "race")["entries"][0]["name"], "orc");
+    let missing = std::panic::catch_unwind(|| group(&body, "game"));
+    assert!(missing.is_err());
+}
+
 fn group<'a>(body: &'a Value, category: &str) -> &'a Value {
     body["groups"]
         .as_array()

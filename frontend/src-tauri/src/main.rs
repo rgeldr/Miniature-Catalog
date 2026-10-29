@@ -42,7 +42,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-fn launch(app: &tauri::App) -> Result<u16, String> {
+fn launch<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<u16, String> {
     let static_dir = resolve_static(app)?;
     let data_dir = resolve_data_dir()?;
     let token = load_or_create_admin_token(&data_dir)?;
@@ -70,7 +70,7 @@ fn launch(app: &tauri::App) -> Result<u16, String> {
     })
 }
 
-fn resolve_static(app: &tauri::App) -> Result<PathBuf, String> {
+fn resolve_static<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<PathBuf, String> {
     if let Ok(value) = std::env::var("MC_STATIC_DIR") {
         let path = PathBuf::from(&value);
         return if path.join("index.html").is_file() {
@@ -136,5 +136,115 @@ mod exit_capability {
         assert!(pattern.test(&"http://127.0.0.1:1420/index.html".parse().unwrap()));
         assert!(!pattern.test(&"http://example.com/".parse().unwrap()));
         assert!(!pattern.test(&"https://127.0.0.1:8094/".parse().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::{box_err, launch, resolve_static, runtime};
+    use std::sync::Mutex;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn set_var(key: &str, value: Option<&std::path::Path>) -> Option<String> {
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        previous
+    }
+
+    fn restore(key: &str, previous: Option<String>) {
+        match previous {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    #[test]
+    fn box_err_and_runtime_are_stable() {
+        let err = box_err("no window".into());
+        assert!(err.to_string().contains("no window"));
+        assert!(std::ptr::eq(runtime(), runtime()));
+    }
+
+    #[test]
+    fn resolve_static_requires_index_html_in_mc_static_dir() {
+        let _lock = env_lock();
+        let root = std::env::temp_dir().join(format!(
+            "mc-static-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ready = root.join("ready");
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&ready).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(ready.join("index.html"), "<!doctype html>").unwrap();
+        let previous = set_var("MC_STATIC_DIR", Some(&ready));
+        let app = tauri::test::mock_app();
+        let found = resolve_static(&app).unwrap();
+        assert_eq!(found, ready);
+        set_var("MC_STATIC_DIR", Some(&empty));
+        let err = resolve_static(&app).unwrap_err();
+        assert!(err.contains("index.html"), "{err}");
+        restore("MC_STATIC_DIR", previous);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn launch_serves_the_catalog_from_the_override_directories() {
+        let _lock = env_lock();
+        let root = std::env::temp_dir().join(format!(
+            "mc-shell-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let static_dir = root.join("static");
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&static_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            static_dir.join("index.html"),
+            "<!doctype html><title>catalog</title>",
+        )
+        .unwrap();
+        let previous_static = set_var("MC_STATIC_DIR", Some(&static_dir));
+        let previous_data = set_var("MC_DATA_DIR", Some(&data_dir));
+        let previous_token = {
+            let previous = std::env::var("MC_ADMIN_TOKEN").ok();
+            unsafe { std::env::remove_var("MC_ADMIN_TOKEN") };
+            previous
+        };
+        let app = tauri::test::mock_app();
+        let port = launch(&app).expect("launch");
+        let mut body = String::new();
+        for _ in 0..50 {
+            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                use std::io::{Read, Write};
+                let _ = stream.write_all(
+                    b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                );
+                let _ = stream.read_to_string(&mut body);
+                if body.contains("ok") {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(body.contains("ok"), "{body}");
+        assert!(data_dir.join("catalog.db").is_file());
+        restore("MC_STATIC_DIR", previous_static);
+        restore("MC_DATA_DIR", previous_data);
+        restore("MC_ADMIN_TOKEN", previous_token);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

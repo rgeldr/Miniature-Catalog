@@ -132,6 +132,34 @@ mod tests {
     }
 
     #[test]
+    fn ids_hosts_and_seed_colors_follow_the_thumbnail_rules() {
+        assert_eq!(validate_id("1AbC-def_90").unwrap(), "1AbC-def_90");
+        assert!(validate_id("short").unwrap_err().contains("not valid"));
+        assert!(validate_id(&"a".repeat(129)).is_err());
+        assert_eq!(
+            id_from_drive_url("https://drive.google.com/file/d/1AbC-def_9012/view").unwrap(),
+            "1AbC-def_9012"
+        );
+        assert!(id_from_drive_url("https://drive.google.com/file/d/short/view").is_err());
+        assert!(google_download_host_ok("drive.google.com"));
+        assert!(google_download_host_ok("docs.google.com"));
+        assert!(google_download_host_ok("googleusercontent.com"));
+        assert!(google_download_host_ok("lh3.googleusercontent.com"));
+        assert!(google_download_host_ok("drive.google.com"));
+        assert!(!google_download_host_ok("evil.example"));
+        assert!(!google_download_host_ok("google.com.evil.example"));
+        let color = seed_color("Orc Archer");
+        assert_eq!(color, seed_color("Orc Archer"));
+        assert_ne!(color, seed_color("Goblin"));
+        let jpeg = solid_jpeg(color);
+        assert!(jpeg.starts_with(&[0xFF, 0xD8]));
+        let image = image::RgbImage::from_pixel(2, 2, image::Rgb(color));
+        let encoded = encode_jpeg(&image).unwrap();
+        assert!(encoded.starts_with(&[0xFF, 0xD8]));
+        assert!(encoded.len() > 10);
+    }
+
+    #[test]
     fn parses_drive_ids_and_rejects_other_urls() {
         assert_eq!(
             parse_drive_file_id("1AbC-def_9012").unwrap(),

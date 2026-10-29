@@ -83,6 +83,22 @@ async fn main() {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::parse_origins;
+
+    #[test]
+    fn parse_origins_keeps_trimmed_origins_and_rejects_a_bad_one() {
+        let origins = parse_origins(" http://localhost:5173, ,https://catalog.example ").unwrap();
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[0], "http://localhost:5173");
+        assert_eq!(origins[1], "https://catalog.example");
+        let err = parse_origins("http://ok, not a header\nvalue").unwrap_err();
+        assert!(err.contains("invalid origin"), "{err}");
+        assert!(parse_origins(" , ").unwrap().is_empty());
+    }
+}
+
 fn parse_origins(raw: &str) -> Result<Vec<http::HeaderValue>, String> {
     let mut origins = Vec::new();
     for part in raw

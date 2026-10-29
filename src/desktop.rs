@@ -372,6 +372,105 @@ mod tests {
         wait_until_down(&client, &health).await;
     }
 
+    fn with_env(key: &str, value: Option<&str>, check: impl FnOnce()) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check));
+        match previous {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn resolve_data_dir_and_env_admin_token_honor_the_process_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        with_env("MC_DATA_DIR", Some(dir.path().to_str().unwrap()), || {
+            assert_eq!(resolve_data_dir().unwrap(), dir.path());
+        });
+        with_env("MC_DATA_DIR", Some("   "), || {
+            let fallback = resolve_data_dir().unwrap();
+            assert!(fallback
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("miniaturecatalog"));
+        });
+        with_env("MC_ADMIN_TOKEN", None, || {
+            assert!(env_admin_token().unwrap().is_none());
+        });
+        with_env("MC_ADMIN_TOKEN", Some("too-short"), || {
+            assert!(env_admin_token().unwrap_err().contains("16"));
+        });
+        with_env("MC_ADMIN_TOKEN", Some("  env-admin-token-value  "), || {
+            assert_eq!(
+                env_admin_token().unwrap().as_deref(),
+                Some("env-admin-token-value")
+            );
+            assert_eq!(
+                load_or_create_admin_token(dir.path()).unwrap(),
+                "env-admin-token-value"
+            );
+        });
+        let settings = Settings::default();
+        assert!(!settings.api_enabled);
+        assert_eq!(settings.api_bind, DEFAULT_API_BIND);
+        let secret = dir.path().join("secret.txt");
+        write_secret(&secret, "token\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "token\n");
+    }
+
+    #[tokio::test]
+    async fn apply_stop_spawn_ui_and_bind_with_retry_open_real_sockets() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::open(dir.path(), "test-admin-token-value", None).unwrap();
+        let host = ApiHost::new();
+        assert!(host.bound_addr().await.is_none());
+        let probe = bind_with_retry("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let settings = Settings {
+            api_enabled: true,
+            api_bind: format!("127.0.0.1:{port}"),
+        };
+        host.apply(state.clone(), &settings).await.unwrap();
+        assert_eq!(host.bound_addr().await.unwrap().port(), port);
+        let health = reqwest::get(format!("http://127.0.0.1:{port}/health"))
+            .await
+            .unwrap();
+        assert!(health.status().is_success());
+        host.stop().await;
+        assert!(host.bound_addr().await.is_none());
+        host.apply(state.clone(), &Settings::default())
+            .await
+            .unwrap();
+        assert!(host.bound_addr().await.is_none());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ui_port = listener.local_addr().unwrap().port();
+        spawn_ui(listener, state);
+        let mut session = None;
+        for _ in 0..50 {
+            if let Ok(response) =
+                reqwest::get(format!("http://127.0.0.1:{ui_port}/api/v1/desktop-session")).await
+            {
+                session = Some(response.json::<Value>().await.unwrap());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(session.unwrap()["token"], "test-admin-token-value");
+    }
+
     async fn free_port() -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

@@ -74,6 +74,18 @@ mod tests {
     }
 
     #[test]
+    fn generated_tokens_are_unique_and_constant_eq_rejects_a_different_length() {
+        let first = generate_token();
+        let second = generate_token();
+        assert!(first.starts_with("mc_"));
+        assert_eq!(first.len(), "mc_".len() + 64);
+        assert_ne!(first, second);
+        assert!(constant_eq(first.as_bytes(), first.as_bytes()));
+        assert!(!constant_eq(first.as_bytes(), second.as_bytes()));
+        assert!(!constant_eq(b"short", b"longer"));
+    }
+
+    #[test]
     fn read_scope_cannot_administer() {
         assert!(Scope::Read.allows(Scope::Read));
         assert!(!Scope::Read.allows(Scope::Admin));
