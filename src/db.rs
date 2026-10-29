@@ -663,13 +663,13 @@ fn tag_entry(conn: &Connection, category: &str, name: &str) -> Result<FilterEntr
 
 fn add_tag_filter(conn: &Connection, category: &str, name: &str) -> Result<FilterEntry, DbError> {
     let stored = single_tag_name(name)?;
-    if list_tags(conn)?
-        .iter()
-        .any(|tag| tag.category == category && tag.name == stored)
+    if let Some(existing) = list_tags(conn)?
+        .into_iter()
+        .find(|tag| tag.category == category && tag.name.eq_ignore_ascii_case(&stored))
     {
         return Err(DbError::Conflict(already_named(
             category_label(category),
-            &stored,
+            &existing.name,
         )));
     }
     create_tag(conn, category, &stored)?;
@@ -687,31 +687,28 @@ fn rename_tag_filter(
     let tags = list_tags(conn)?;
     let Some(tag) = tags
         .iter()
-        .find(|tag| tag.category == category && tag.name == old)
+        .find(|tag| tag.category == category && tag.name.eq_ignore_ascii_case(&old))
     else {
         return Err(DbError::NotFound);
     };
-    if old == new {
-        return Ok(());
-    }
-    if tags
-        .iter()
-        .any(|other| other.category == category && other.name == new)
-    {
+    if tags.iter().any(|other| {
+        other.id != tag.id && other.category == category && other.name.eq_ignore_ascii_case(&new)
+    }) {
         return Err(DbError::Conflict(rename_refused(
             category_label(category),
             &new,
         )));
     }
+    if tag.name == new {
+        return Ok(());
+    }
     let label = category_label(category);
-    conn.execute(
-        "UPDATE tags SET name = ?1 WHERE id = ?2",
-        params![new, tag.id],
-    )
-    .map_err(|err| match DbError::from(err) {
-        DbError::Conflict(_) => DbError::Conflict(rename_refused(label, &new)),
-        other => other,
-    })?;
+    let id = tag.id;
+    conn.execute("UPDATE tags SET name = ?1 WHERE id = ?2", params![new, id])
+        .map_err(|err| match DbError::from(err) {
+            DbError::Conflict(_) => DbError::Conflict(rename_refused(label, &new)),
+            other => other,
+        })?;
     Ok(())
 }
 
@@ -719,7 +716,7 @@ fn delete_tag_filter(conn: &Connection, category: &str, name: &str) -> Result<()
     let stored = single_tag_name(name)?;
     let tag = list_tags(conn)?
         .into_iter()
-        .find(|tag| tag.category == category && tag.name == stored)
+        .find(|tag| tag.category == category && tag.name.eq_ignore_ascii_case(&stored))
         .ok_or(DbError::NotFound)?;
     let used_by: i64 = conn.query_row(
         "SELECT COUNT(*) FROM miniature_tags WHERE tag_id = ?1",
@@ -1829,5 +1826,318 @@ mod tests {
         assert_eq!(again.id, original.id);
         assert_eq!(original.name, "Goblin");
         assert_eq!(again.name, "Goblin");
+    }
+
+    #[test]
+    fn filters_treat_tag_spelling_as_the_same_value_and_keep_the_stored_case() {
+        let conn = conn();
+        assert!(seed_example(&conn).unwrap());
+        let duplicate = add_filter(&conn, "race", "Goblin", None, None).unwrap_err();
+        let DbError::Conflict(message) = duplicate else {
+            panic!("expected a conflict, got {duplicate:?}");
+        };
+        assert!(message.contains("goblin"), "{message}");
+        assert_eq!(
+            already_named("race", "goblin"),
+            "a race named \"goblin\" already exists"
+        );
+
+        let spelled = rename_filter(&conn, "race", "ORC", "orc", None).unwrap();
+        assert_eq!(spelled.name, "orc");
+        assert!(spelled.used_by >= 2);
+        let unchanged = rename_tag_filter(&conn, "race", "orc", "orc").unwrap();
+        assert_eq!(unchanged, ());
+        let conflict = rename_filter(&conn, "race", "orc", "goblin", None).unwrap_err();
+        let DbError::Conflict(message) = conflict else {
+            panic!("expected a conflict, got {conflict:?}");
+        };
+        assert!(
+            message.contains("goblin") && message.contains("not applied"),
+            "{message}"
+        );
+        assert!(rename_refused("race", "goblin").contains("not applied"));
+
+        let renamed = rename_filter(&conn, "race", "orc", "beastfolk", None).unwrap();
+        assert_eq!(renamed.name, "beastfolk");
+        let miniatures = list_miniatures(&conn, &MiniFilter::default()).unwrap();
+        assert!(miniatures
+            .iter()
+            .any(|mini| mini.races.iter().any(|race| race == "beastfolk")));
+        assert!(miniatures
+            .iter()
+            .all(|mini| mini.races.iter().all(|race| race != "orc")));
+
+        let missing = delete_tag_filter(&conn, "race", "not-a-race").unwrap_err();
+        assert!(matches!(missing, DbError::NotFound));
+        let added = add_tag_filter(&conn, "role", "Scout").unwrap();
+        assert_eq!(added.name, "Scout");
+        assert_eq!(added.used_by, 0);
+        delete_filter(&conn, "role", "scout", None).unwrap();
+        assert!(list_tags(&conn)
+            .unwrap()
+            .iter()
+            .all(|tag| tag.name != "Scout"));
+
+        let bad = add_filter(&conn, "color", "red", None, None).unwrap_err();
+        assert!(matches!(bad, DbError::Invalid(_)));
+        assert!(format!("{:?}", unknown_category()).contains("category"));
+        assert_eq!(category_label("combat"), "combat style");
+        assert_eq!(category_label("race"), "race");
+        assert_eq!(
+            still_in_use("size", 1),
+            "1 miniature still uses this size. Reassign it before deleting."
+        );
+        assert!(still_in_use("size", 2).contains("2 miniatures"));
+        assert_eq!(single_tag_name("  Elf ").unwrap(), "Elf");
+        assert!(single_tag_name("   ").is_err());
+    }
+
+    #[test]
+    fn facet_and_location_filters_add_rename_and_block_deletes_that_are_in_use() {
+        let conn = conn();
+        assert!(seed_example(&conn).unwrap());
+        let groups = list_filters(&conn).unwrap();
+        let size_group = groups
+            .iter()
+            .find(|group| group.category == "size")
+            .unwrap();
+        assert!(size_group.entries.iter().any(|entry| entry.name == "28mm"));
+        assert!(facet_names(&conn, "size")
+            .unwrap()
+            .iter()
+            .any(|name| name == "28mm"));
+        assert!(facet_known(&conn, "size", "28MM").unwrap());
+        assert!(facet_used_by(&conn, "size", "28mm").unwrap() >= 1);
+        assert!(facet_entry(&conn, "size", "28mm").unwrap().used_by >= 1);
+        assert!(facet_group(&conn, "game", "Game")
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.used_by > 0));
+
+        let fresh = add_facet_filter(&conn, "size", "15mm").unwrap();
+        assert_eq!(fresh.name, "15mm");
+        assert_eq!(fresh.used_by, 0);
+        assert!(plain_entry("15mm".into(), 0).id.is_none());
+        let duplicate = add_filter(&conn, "size", "15MM", None, None).unwrap_err();
+        assert!(matches!(duplicate, DbError::Conflict(_)));
+        delete_facet_filter(&conn, "size", "15MM").unwrap();
+        assert!(!facet_known(&conn, "size", "15mm").unwrap());
+
+        let blocked = delete_filter(&conn, "size", "32mm", None).unwrap_err();
+        let DbError::Conflict(message) = blocked else {
+            panic!("expected a conflict, got {blocked:?}");
+        };
+        assert!(message.contains("Reassign"));
+        let refused = rename_facet_filter(&conn, "size", "28mm", "32mm").unwrap_err();
+        assert!(matches!(refused, DbError::Conflict(_)));
+        let spelled = rename_facet_filter(&conn, "size", "28mm", "28MM").unwrap();
+        assert_eq!(spelled, "28MM");
+        assert!(clean_facet_name("game", "  Frostgrave ").unwrap() == "Frostgrave");
+        assert!(clean_facet_name("race", "orc").is_err());
+        assert!(facet_names(&conn, "color").is_err());
+
+        let grouped: FilterGroup = location_group(&conn).unwrap();
+        assert_eq!(grouped.category, "location");
+        let box_entry: &FilterEntry = grouped
+            .entries
+            .iter()
+            .find(|entry| entry.name == "Box 2")
+            .unwrap();
+        assert!(box_entry.path.as_deref().unwrap().contains("Cabinet A"));
+        assert_eq!(
+            location_entry(&conn, box_entry.id.unwrap()).unwrap().name,
+            "Box 2"
+        );
+
+        let room = add_location_filter(&conn, "Attic", "room", None).unwrap();
+        assert_eq!(room.kind.as_deref(), Some("room"));
+        assert!(sibling_name_taken(&conn, None, "Attic", None).unwrap());
+        assert!(!sibling_name_taken(&conn, None, "Attic", room.id).unwrap());
+        let again = add_location_filter(&conn, "Attic", "room", None).unwrap_err();
+        assert!(matches!(again, DbError::Conflict(_)));
+        let renamed = rename_location_filter(&conn, room.id.unwrap(), "Loft").unwrap();
+        assert_eq!(renamed.name, "Loft");
+        delete_location(&conn, room.id.unwrap()).unwrap();
+        assert!(get_location(&conn, room.id.unwrap()).unwrap().is_none());
+        assert!(matches!(
+            delete_location(&conn, room.id.unwrap()).unwrap_err(),
+            DbError::NotFound
+        ));
+
+        let parent: Location = list_locations(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|location| location.name == "Cabinet A")
+            .unwrap();
+        let child_block = delete_location(&conn, parent.id).unwrap_err();
+        let DbError::Conflict(message) = child_block else {
+            panic!("expected a conflict, got {child_block:?}");
+        };
+        assert!(message.contains("inside"));
+        assert!(clean_location_name("  Shelf ").unwrap() == "Shelf");
+        assert!(clean_location_name("A > B").is_err());
+    }
+
+    #[test]
+    fn miniature_rows_keys_and_path_helpers_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("catalog.db");
+        let conn = open_connection(&path).unwrap();
+        assert!(path.is_file());
+
+        let room_id = insert_location(
+            &conn,
+            &NewLocation {
+                name: "Desk".into(),
+                kind: "room".into(),
+                parent_id: None,
+            },
+        )
+        .unwrap();
+        let drawer_id = insert_location(
+            &conn,
+            &NewLocation {
+                name: "Drawer".into(),
+                kind: "drawer".into(),
+                parent_id: Some(room_id),
+            },
+        )
+        .unwrap();
+        let rows = load_location_rows(&conn).unwrap();
+        assert_eq!(path_of(&rows, drawer_id).as_deref(), Some("Desk > Drawer"));
+        assert!(would_cycle(&rows, room_id, Some(drawer_id)));
+        assert!(!would_cycle(&rows, drawer_id, None));
+        assert!(require_location(&conn, 999).is_err());
+        require_location(&conn, room_id).unwrap();
+
+        let created_id = insert_miniature(
+            &conn,
+            &sample(
+                "Hero",
+                "notes",
+                2,
+                "32mm",
+                Some("Frostgrave"),
+                drawer_id,
+                &["Elf"],
+                &["Scout"],
+                &["Ranged"],
+            ),
+        )
+        .unwrap();
+        let locations = list_locations(&conn).unwrap();
+        let loaded = load_miniatures(&conn, &locations).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let tags = load_tag_map(&conn).unwrap();
+        assert_eq!(tags.get(&created_id).map(Vec::len), Some(3));
+        let found = get_miniature(&conn, created_id).unwrap().unwrap();
+        assert_eq!(found.name, "Hero");
+        assert_eq!(found.location_path, "Desk > Drawer");
+        set_thumbnail(&conn, created_id, "1.jpg").unwrap();
+        assert!(get_miniature(&conn, created_id)
+            .unwrap()
+            .unwrap()
+            .thumbnail_url
+            .is_some());
+        assert!(matches!(
+            set_thumbnail(&conn, 404, "missing.jpg").unwrap_err(),
+            DbError::NotFound
+        ));
+
+        let replaced = NewMiniature {
+            name: "Hero".into(),
+            notes: String::new(),
+            quantity: 2,
+            size: "32mm".into(),
+            game: None,
+            location_id: drawer_id,
+            races: vec!["Human".into()],
+            roles: vec![],
+            combat: vec!["Melee".into()],
+        };
+        replace_tags(&conn, created_id, &replaced).unwrap();
+        let retagged = get_miniature(&conn, created_id).unwrap().unwrap();
+        assert_eq!(retagged.races, vec!["Human"]);
+        assert_eq!(retagged.roles, Vec::<String>::new());
+        assert_eq!(retagged.combat, vec!["Melee".to_string()]);
+        assert_eq!(retagged.game.as_deref(), Some("Frostgrave"));
+        ensure_tag(&conn, "race", "human").unwrap();
+        let tag_id = ensure_tag(&conn, "race", "HUMAN").unwrap();
+        let stored: Tag = list_tags(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.id == tag_id)
+            .unwrap();
+        assert_eq!(stored.name, "Human");
+
+        delete_miniature(&conn, created_id).unwrap();
+        assert!(get_miniature(&conn, created_id).unwrap().is_none());
+        assert!(matches!(
+            delete_miniature(&conn, created_id).unwrap_err(),
+            DbError::NotFound
+        ));
+
+        let subtree = subtree_ids(&locations, &[room_id]);
+        assert!(subtree.contains(&room_id) && subtree.contains(&drawer_id));
+        let mut children = std::collections::HashMap::new();
+        children.insert(room_id, vec![drawer_id]);
+        let mut walked = std::collections::HashSet::new();
+        walk(room_id, &children, &mut walked);
+        walk(room_id, &children, &mut walked);
+        assert_eq!(walked.len(), 2);
+
+        assert!(ci_any("32mm", &["28mm".into(), "32MM".into()]));
+        assert!(ci_any("32mm", &[String::new()]));
+        assert!(!ci_any("32mm", &["15mm".into()]));
+        assert!(game_any(Some("Frostgrave"), &["frostgrave".into()]));
+        assert!(!game_any(None, &["Frostgrave".into()]));
+        assert!(game_any(None, &[]));
+        let mut names = vec!["Elf".into()];
+        push_one(&mut names, "elf".into());
+        push_one(&mut names, "Orc".into());
+        assert_eq!(names, vec!["Elf".to_string(), "Orc".to_string()]);
+
+        assert_eq!(required("  Name ", "name", 80).unwrap(), "Name");
+        assert!(required("   ", "name", 80).is_err());
+        assert!(required(&"x".repeat(81), "name", 80).is_err());
+        assert_eq!(optional_text(None, "game", 10).unwrap(), None);
+        assert_eq!(optional_text(Some("  "), "game", 10).unwrap(), None);
+        assert_eq!(
+            optional_text(Some(" Quest "), "game", 10)
+                .unwrap()
+                .as_deref(),
+            Some("Quest")
+        );
+        assert!(optional_text(Some("too-long-game"), "game", 4).is_err());
+        let tags = normalize_tags(&[" Orc ".into(), "orc".into(), "".into()]).unwrap();
+        assert_eq!(tags, vec!["Orc".to_string()]);
+        assert!(normalize_tags(&["bad_tag".into()]).is_err());
+
+        let key_id = insert_api_key(&conn, "reader", "hash-1", "read").unwrap();
+        let keys: Vec<ApiKeyRow> = list_api_keys(&conn).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name, "reader");
+        assert_eq!(
+            active_scope(&conn, "hash-1").unwrap().as_deref(),
+            Some("read")
+        );
+        revoke_api_key(&conn, key_id).unwrap();
+        assert!(active_scope(&conn, "hash-1").unwrap().is_none());
+        revoke_api_key(&conn, key_id).unwrap();
+        assert!(matches!(
+            revoke_api_key(&conn, 99).unwrap_err(),
+            DbError::NotFound
+        ));
+        let report = location_report(&conn).unwrap();
+        let desk: &LocationReport = report.iter().find(|row| row.name == "Desk").unwrap();
+        assert_eq!(desk.direct_entries, 0);
+        let catalog: Facets = facets(&conn).unwrap();
+        assert!(catalog.races.iter().any(|race| race == "Human"));
+        assert!(catalog.sizes.is_empty());
+        let entry: FilterEntry = tag_entry(&conn, "race", "Human").unwrap();
+        assert_eq!(entry.used_by, 0);
+        let race_group = tag_group(&conn, "race", "Race").unwrap();
+        assert!(race_group.entries.iter().any(|entry| entry.name == "Human"));
     }
 }

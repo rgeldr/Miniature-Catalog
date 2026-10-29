@@ -14,6 +14,9 @@ tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 url = "2"
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

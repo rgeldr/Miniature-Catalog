@@ -85,7 +85,7 @@ export type MiniatureInput = {
   combat: string[];
 };
 
-async function readError(response: Response): Promise<string> {
+export async function readError(response: Response): Promise<string> {
   const text = await response.text();
   if (!text) return response.statusText;
   try {

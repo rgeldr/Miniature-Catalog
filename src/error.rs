@@ -90,6 +90,56 @@ fn constraint_message(message: Option<&str>) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn api_error_responses_use_the_status_and_message_for_each_variant() {
+        let cases = [
+            (ApiError::unauthorized(), 401, "missing or invalid token"),
+            (
+                ApiError::forbidden(),
+                403,
+                "this token is not allowed to do that",
+            ),
+            (ApiError::not_found(), 404, "not found"),
+            (ApiError::internal(), 500, "internal error"),
+            (ApiError::bad("name is required"), 400, "name is required"),
+            (ApiError::conflict("already exists"), 409, "already exists"),
+        ];
+        for (error, status, message) in cases {
+            let response = error.into_response();
+            assert_eq!(response.status().as_u16(), status);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX);
+            let body = futures_executor(body);
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["error"], message);
+        }
+        assert!(
+            constraint_message(Some("FOREIGN KEY constraint failed")).contains("does not exist")
+        );
+        assert!(
+            constraint_message(Some("UNIQUE constraint failed: tags.name"))
+                .contains("already exists")
+        );
+        assert!(constraint_message(None).contains("conflicts"));
+        let mapped = ApiError::from(DbError::NotFound);
+        assert_eq!(mapped.into_response().status().as_u16(), 404);
+    }
+
+    fn futures_executor(
+        future: impl std::future::Future<Output = Result<axum::body::Bytes, axum::Error>>,
+    ) -> axum::body::Bytes {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(future).unwrap()
+    }
+}
+
 impl From<DbError> for ApiError {
     fn from(err: DbError) -> Self {
         match err {

@@ -8,9 +8,11 @@ import {
   type LocationReport,
   type Miniature,
 } from "./api";
-import { version } from "../package.json";
+import packageJson from "../package.json" with { type: "json" };
 import { requestExit } from "./desktop-exit";
 import { applyTheme, currentTheme, readTheme } from "./theme";
+
+const version = packageJson.version;
 
 applyTheme(readTheme(), false);
 
@@ -1165,3 +1167,53 @@ async function boot(): Promise<void> {
     say("Save a token to load the catalog.");
   }
 }
+
+export {
+  applyShownWidth,
+  boot,
+  changeFilter,
+  checked,
+  checks,
+  clampFilters,
+  closeMenus,
+  commitFiltersWidth,
+  esc,
+  exitApp,
+  filterRow,
+  filterSay,
+  filtersMax,
+  focusable,
+  layoutFilters,
+  loadApiSettings,
+  loadKeys,
+  loopback,
+  narrowLayout,
+  openFilters,
+  openMenu,
+  openMiniature,
+  paintThemeToggle,
+  queryFromFilters,
+  readFiltersWidth,
+  refresh,
+  reloadFilterEditor,
+  remPx,
+  renderApiStatus,
+  renderEditor,
+  renderFilterEditor,
+  renderFilters,
+  renderKeys,
+  renderLocationForm,
+  renderReport,
+  searchMinis,
+  showBindWarning,
+  showDialog,
+  showResults,
+  shownFiltersWidth,
+  siblingMenu,
+  splitExtra,
+  uniqueTags,
+  wireDialog,
+  wireDivider,
+  wireMenu,
+  writeFiltersWidth,
+};

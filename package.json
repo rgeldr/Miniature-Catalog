@@ -6,10 +6,11 @@
   "scripts": {
     "version:check": "node scripts/version.mjs check",
     "version:bump": "node scripts/version.mjs bump",
-    "test": "node scripts/version.test.mjs && node scripts/exit.test.mjs && node scripts/frontend-deps.test.mjs",
+    "test": "node scripts/version.test.mjs && node scripts/exit.test.mjs && node scripts/frontend-deps.test.mjs && node --experimental-transform-types --import ./scripts/register-ts.mjs scripts/theme.test.mjs && node --experimental-transform-types --import ./scripts/register-ts.mjs scripts/catalog-api.test.mjs && node --experimental-transform-types --import ./scripts/register-ts.mjs scripts/ui.test.mjs",
     "release": "npm install --prefix frontend && npm --prefix frontend run tauri -- build"
   },
   "devDependencies": {
+    "linkedom": "^0.18.12",
     "typescript": "^7.0.2"
   }
 }

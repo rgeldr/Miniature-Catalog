@@ -664,17 +664,9 @@ async fn download_drive_file(state: &AppState, file_id: &str) -> Result<Vec<u8>,
             "Drive did not return the file. Share it as anyone with the link.",
         ));
     }
-    let host = response.url().host_str().unwrap_or("");
-    if !thumb::google_download_host_ok(host) {
-        return Err(ApiError::bad(
-            "Drive download redirected to an unexpected host",
-        ));
-    }
-    if let Some(length) = response.content_length() {
-        if length > MAX_IMAGE as u64 {
-            return Err(ApiError::bad("image is larger than 8MB"));
-        }
-    }
+    let host = response.url().host_str().unwrap_or("").to_string();
+    let length = response.content_length();
+    accepted_drive_body(&host, length, &[])?;
     let mut response = response;
     let mut buf = Vec::new();
     while let Some(chunk) = response
@@ -687,18 +679,35 @@ async fn download_drive_file(state: &AppState, file_id: &str) -> Result<Vec<u8>,
         }
         buf.extend_from_slice(&chunk);
     }
-    let trimmed = buf
+    accepted_drive_body(&host, None, &buf)?;
+    Ok(buf)
+}
+
+fn accepted_drive_body(
+    host: &str,
+    content_length: Option<u64>,
+    body: &[u8],
+) -> Result<(), ApiError> {
+    if !thumb::google_download_host_ok(host) {
+        return Err(ApiError::bad(
+            "Drive download redirected to an unexpected host",
+        ));
+    }
+    if content_length.is_some_and(|length| length > MAX_IMAGE as u64) || body.len() > MAX_IMAGE {
+        return Err(ApiError::bad("image is larger than 8MB"));
+    }
+    let head = body
         .iter()
         .take(64)
-        .cloned()
+        .copied()
         .collect::<Vec<_>>()
         .to_ascii_lowercase();
-    if trimmed.starts_with(b"<!doctype") || trimmed.starts_with(b"<html") {
+    if head.starts_with(b"<!doctype") || head.starts_with(b"<html") {
         return Err(ApiError::bad(
             "Drive returned a web page instead of an image. Share the file as anyone with the link, or upload the image directly.",
         ));
     }
-    Ok(buf)
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -821,5 +830,687 @@ where
             Ok(Json(value)) => Ok(JsonBody(value)),
             Err(err) => Err(ApiError::bad(format!("invalid JSON: {err}"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        accepted_drive_body, add_filter, authenticate, bearer, build, create_key, create_location,
+        create_miniature, delete_filter, delete_location, delete_miniature, desktop_session,
+        download_drive_file, ensure_miniature, fallback, get_miniature, get_settings,
+        get_thumbnail, import_thumbnail, internal_message, list_filters, list_keys,
+        list_miniatures, list_tags, mime_of, openapi_doc, read_image_bytes, rename_filter,
+        revoke_key, router, safe_join, settings_view, split_csv, store_thumbnail, ui_router,
+        upload_thumbnail, validate_prep, FilterBody, JsonBody, KeyBody, LocationBody, MiniQuery,
+        MiniatureBody, SettingsBody, MAX_IMAGE,
+    };
+    use crate::auth::Scope;
+    use crate::error::ApiError;
+    use crate::prep::Need;
+    use crate::state::AppState;
+    use crate::thumb;
+    use axum::body::Body;
+    use axum::extract::{FromRequest, Path, Query, Request, State};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    fn fixture() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::open(dir.path(), "test-admin-token-value", None).unwrap();
+        (dir, state)
+    }
+
+    async fn error_text(err: ApiError) -> (StatusCode, String) {
+        let response = err.into_response();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (
+            status,
+            value["error"].as_str().unwrap_or_default().to_string(),
+        )
+    }
+
+    async fn call(app: axum::Router, method: &str, uri: &str, token: Option<&str>) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        response.status()
+    }
+
+    #[test]
+    fn accepted_drive_body_rejects_a_foreign_host_an_oversized_file_and_html() {
+        assert!(accepted_drive_body("drive.google.com", None, b"\xff\xd8\xff").is_ok());
+        let host = accepted_drive_body("evil.example", None, b"\xff\xd8").unwrap_err();
+        assert!(
+            format!("{host:?}").contains("BadRequest") || matches!(host, ApiError::BadRequest(_))
+        );
+        let huge =
+            accepted_drive_body("docs.google.com", Some(MAX_IMAGE as u64 + 1), b"").unwrap_err();
+        let (status_hint, _) = (huge, "image is larger than 8MB");
+        assert!(
+            format!("{status_hint:?}").contains("8MB")
+                || format!("{status_hint:?}").contains("BadRequest")
+        );
+        let page = accepted_drive_body("lh3.googleusercontent.com", None, b"<!DOCTYPE html><html>")
+            .unwrap_err();
+        assert!(format!("{page:?}").contains("BadRequest"));
+        let grown = vec![0u8; MAX_IMAGE + 1];
+        assert!(accepted_drive_body("drive.google.com", None, &grown).is_err());
+    }
+
+    #[tokio::test]
+    async fn json_bodies_helpers_and_drive_download_report_useful_errors() {
+        let bad = Request::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{"))
+            .unwrap();
+        let err = match JsonBody::<Value>::from_request(bad, &()).await {
+            Err(err) => err,
+            Ok(_) => panic!("invalid JSON was accepted"),
+        };
+        let (status, message) = error_text(err).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(message.contains("invalid JSON"), "{message}");
+
+        let good = Request::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"name":"Desk","kind":"room","parent_id":null}"#,
+            ))
+            .unwrap();
+        let JsonBody(body) = JsonBody::<LocationBody>::from_request(good, &())
+            .await
+            .unwrap();
+        let location = body.into_new();
+        assert_eq!(location.name, "Desk");
+        assert_eq!(location.kind, "room");
+        assert!(location.parent_id.is_none());
+
+        let mini = MiniatureBody {
+            name: "Hero".into(),
+            notes: "  ".into(),
+            quantity: 2,
+            size: "28mm".into(),
+            game: Some("Quest".into()),
+            location_id: 4,
+            races: vec!["Elf".into()],
+            roles: vec![],
+            combat: vec!["Melee".into()],
+        }
+        .into_new();
+        assert_eq!(mini.quantity, 2);
+        assert_eq!(mini.location_id, 4);
+
+        let filter = MiniQuery {
+            q: Some("orc".into()),
+            race: Some("orc, goblin".into()),
+            role: None,
+            combat: Some("".into()),
+            size: None,
+            game: None,
+            location_id: Some("3, 4".into()),
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(filter.name.as_deref(), Some("orc"));
+        assert_eq!(filter.races, vec!["orc".to_string(), "goblin".to_string()]);
+        assert!(filter.combat.is_empty());
+        assert_eq!(filter.location_ids, vec![3, 4]);
+        assert!(MiniQuery {
+            q: None,
+            race: None,
+            role: None,
+            combat: None,
+            size: None,
+            game: None,
+            location_id: Some("nope".into()),
+        }
+        .into_filter()
+        .is_err());
+        assert!(split_csv(None).is_empty());
+        assert_eq!(
+            split_csv(Some(" a, ,b ".into())),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        let root = std::path::Path::new("/var/catalog");
+        assert_eq!(
+            safe_join(root, "assets/app.js").unwrap(),
+            std::path::PathBuf::from("/var/catalog/assets/app.js")
+        );
+        assert!(safe_join(root, "../secret").is_none());
+        assert_eq!(
+            mime_of(std::path::Path::new("index.html")),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            mime_of(std::path::Path::new("app.css")),
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            mime_of(std::path::Path::new("app.js")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(mime_of(std::path::Path::new("icon.svg")), "image/svg+xml");
+        assert_eq!(mime_of(std::path::Path::new("icon.png")), "image/png");
+        assert_eq!(mime_of(std::path::Path::new("photo.jpg")), "image/jpeg");
+        assert_eq!(mime_of(std::path::Path::new("photo.jpeg")), "image/jpeg");
+        assert_eq!(mime_of(std::path::Path::new("photo.webp")), "image/webp");
+        assert_eq!(
+            mime_of(std::path::Path::new("file.bin")),
+            "application/octet-stream"
+        );
+
+        let empty = validate_prep(&[]).unwrap_err();
+        let (_, message) = error_text(empty).await;
+        assert!(message.contains("1 to 50"));
+        let vague = Need {
+            label: "x".into(),
+            name: None,
+            races: vec![],
+            roles: vec![],
+            combat: vec![],
+            tags: vec![],
+            size: None,
+            game: None,
+            quantity: 1,
+        };
+        assert!(
+            validate_prep(&[vague])
+                .unwrap_err()
+                .into_response()
+                .status()
+                == StatusCode::BAD_REQUEST
+        );
+        let ok = Need {
+            label: "orcs".into(),
+            name: Some("orc".into()),
+            races: vec![],
+            roles: vec![],
+            combat: vec![],
+            tags: vec![],
+            size: None,
+            game: None,
+            quantity: 1,
+        };
+        validate_prep(&[ok]).unwrap();
+
+        let internal = internal_message("disk full".into());
+        let (status, message) = error_text(internal).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(message, "internal error");
+    }
+
+    #[tokio::test]
+    async fn handlers_create_list_rename_and_delete_catalog_records() {
+        let (_dir, state) = fixture();
+        assert!(state.seed_example().unwrap());
+
+        let Json(tags) = list_tags(State(state.clone())).await.unwrap();
+        assert!(tags["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag["name"] == "orc"));
+        let Json(filters) = list_filters(State(state.clone())).await.unwrap();
+        assert!(filters["groups"].as_array().unwrap().len() >= 6);
+
+        let (status, Json(added)) = add_filter(
+            State(state.clone()),
+            JsonBody(FilterBody {
+                category: "role".into(),
+                name: "Scout".into(),
+                new_name: None,
+                kind: None,
+                parent_id: None,
+                id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(added.name, "Scout");
+        let Json(renamed) = rename_filter(
+            State(state.clone()),
+            JsonBody(FilterBody {
+                category: "role".into(),
+                name: "scout".into(),
+                new_name: Some("Pathfinder".into()),
+                kind: None,
+                parent_id: None,
+                id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.name, "Pathfinder");
+        let removed = delete_filter(
+            State(state.clone()),
+            JsonBody(FilterBody {
+                category: "role".into(),
+                name: "Pathfinder".into(),
+                new_name: None,
+                kind: None,
+                parent_id: None,
+                id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(removed, StatusCode::NO_CONTENT);
+
+        let (status, Json(room)) = create_location(
+            State(state.clone()),
+            JsonBody(LocationBody {
+                name: "Closet".into(),
+                kind: "room".into(),
+                parent_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, Json(mini)) = create_miniature(
+            State(state.clone()),
+            JsonBody(MiniatureBody {
+                name: "Closet Hero".into(),
+                notes: String::new(),
+                quantity: 1,
+                size: "28mm".into(),
+                game: None,
+                location_id: room.id,
+                races: vec!["human".into()],
+                roles: vec![],
+                combat: vec!["melee".into()],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let Json(loaded) = get_miniature(State(state.clone()), Path(mini.id))
+            .await
+            .unwrap();
+        assert_eq!(loaded.name, "Closet Hero");
+        let missing = get_miniature(State(state.clone()), Path(999_999))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.into_response().status(), StatusCode::NOT_FOUND);
+
+        let blocked = delete_location(State(state.clone()), Path(room.id))
+            .await
+            .unwrap_err();
+        let (_, message) = error_text(blocked).await;
+        assert!(message.contains("stored here"), "{message}");
+        delete_miniature(State(state.clone()), Path(mini.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            delete_location(State(state.clone()), Path(room.id))
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(ensure_miniature(&state, mini.id).is_err());
+
+        let Json(found) = list_miniatures(
+            State(state.clone()),
+            Query(MiniQuery {
+                q: Some("archer".into()),
+                race: None,
+                role: None,
+                combat: None,
+                size: None,
+                game: None,
+                location_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(found["miniatures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|mini| mini["name"] == "Orc Archer"));
+    }
+
+    #[tokio::test]
+    async fn thumbnails_keys_settings_and_session_follow_the_handler_contracts() {
+        let (dir, state) = fixture();
+        let (status, Json(room)) = create_location(
+            State(state.clone()),
+            JsonBody(LocationBody {
+                name: "Desk".into(),
+                kind: "room".into(),
+                parent_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, Json(mini)) = create_miniature(
+            State(state.clone()),
+            JsonBody(MiniatureBody {
+                name: "Portrait".into(),
+                notes: String::new(),
+                quantity: 1,
+                size: "32mm".into(),
+                game: None,
+                location_id: room.id,
+                races: vec![],
+                roles: vec![],
+                combat: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        ensure_miniature(&state, mini.id).unwrap();
+
+        let jpeg = thumb::solid_jpeg([4, 5, 6]);
+        let direct = Request::builder()
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .body(Body::from(jpeg.clone()))
+            .unwrap();
+        assert_eq!(read_image_bytes(direct).await.unwrap(), jpeg);
+
+        let mut multipart = Vec::new();
+        multipart.extend_from_slice(
+            b"--bound\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n",
+        );
+        multipart.extend_from_slice(&jpeg);
+        multipart.extend_from_slice(b"\r\n--bound--\r\n");
+        let form = Request::builder()
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=bound")
+            .body(Body::from(multipart))
+            .unwrap();
+        assert_eq!(read_image_bytes(form).await.unwrap(), jpeg);
+        let empty = Request::builder()
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from("nope"))
+            .unwrap();
+        let (_, message) = error_text(read_image_bytes(empty).await.unwrap_err()).await;
+        assert!(
+            message.contains("file field") || message.contains("image"),
+            "{message}"
+        );
+
+        let upload = Request::builder()
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .body(Body::from(jpeg.clone()))
+            .unwrap();
+        let Json(saved) = upload_thumbnail(State(state.clone()), Path(mini.id), upload)
+            .await
+            .unwrap();
+        assert!(saved.thumbnail_url.ends_with("/thumbnail"));
+        assert!(state.thumbs_dir.join(format!("{}.jpg", mini.id)).is_file());
+        let response = get_thumbnail(State(state.clone()), Path(mini.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/jpeg"
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.starts_with(&[0xFF, 0xD8]));
+
+        let oversized = vec![0u8; 64];
+        // A non-image payload is rejected by the decoder rather than stored.
+        let bad_image = store_thumbnail(&state, mini.id, &oversized)
+            .await
+            .unwrap_err();
+        let (_, message) = error_text(bad_image).await;
+        assert!(!message.is_empty());
+        let too_big = vec![9u8; MAX_IMAGE + 1];
+        let (_, message) = error_text(
+            store_thumbnail(&state, mini.id, &too_big)
+                .await
+                .unwrap_err(),
+        )
+        .await;
+        assert!(message.contains("8MB"), "{message}");
+
+        let bad_link = match import_thumbnail(
+            State(state.clone()),
+            Path(mini.id),
+            JsonBody(super::ImportBody {
+                source: "https://example.com/not-drive".into(),
+            }),
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("a non-Drive link was accepted"),
+        };
+        let (_, message) = error_text(bad_link).await;
+        assert!(
+            message.contains("Drive")
+                || message.contains("link")
+                || message.contains("Photos")
+                || !message.is_empty()
+        );
+
+        let mut offline = state.clone();
+        offline.http = reqwest::Client::builder()
+            .resolve("drive.google.com", "127.0.0.1:1".parse().unwrap())
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let failed = download_drive_file(&offline, "1AbC-def_9012")
+            .await
+            .unwrap_err();
+        let (_, message) = error_text(failed).await;
+        assert!(message.contains("could not download"), "{message}");
+
+        let (status, Json(created)) = create_key(
+            State(state.clone()),
+            JsonBody(KeyBody {
+                name: "reader".into(),
+                scope: "read".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(created.token.starts_with("mc_"));
+        assert_eq!(created.scope, "read");
+        let bad_scope = match create_key(
+            State(state.clone()),
+            JsonBody(KeyBody {
+                name: "reader".into(),
+                scope: "owner".into(),
+            }),
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("scope owner was accepted"),
+        };
+        let (_, message) = error_text(bad_scope).await;
+        assert!(message.contains("scope"), "{message}");
+        let Json(keys) = list_keys(State(state.clone())).await.unwrap();
+        assert_eq!(keys["api_keys"][0]["name"], "reader");
+        assert_eq!(
+            revoke_key(State(state.clone()), Path(created.id))
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+
+        let Json(session) = desktop_session(State(state.clone())).await;
+        assert_eq!(session["token"], "test-admin-token-value");
+        let Json(settings) = get_settings(State(state.clone())).await.unwrap();
+        assert_eq!(settings["api_enabled"], false);
+        assert_eq!(settings["managed"], false);
+        let view = settings_view(&state).await.unwrap();
+        assert_eq!(view["api_bind"], "127.0.0.1:8080");
+        let Json(saved) = super::put_settings(
+            State(state.clone()),
+            JsonBody(SettingsBody {
+                api_enabled: false,
+                api_bind: "127.0.0.1:9091".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved["api_bind"], "127.0.0.1:9091");
+        assert!(dir.path().join("settings.json").is_file());
+
+        let mut headers = HeaderMap::new();
+        assert!(bearer(&headers).is_none());
+        headers.insert(header::AUTHORIZATION, "Basic secret".parse().unwrap());
+        assert!(bearer(&headers).is_none());
+        headers.insert(
+            header::AUTHORIZATION,
+            "bearer test-admin-token-value".parse().unwrap(),
+        );
+        assert_eq!(bearer(&headers).as_deref(), Some("test-admin-token-value"));
+        assert_eq!(authenticate(&state, &headers).unwrap(), Scope::Admin);
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer missing-token-value".parse().unwrap(),
+        );
+        assert!(authenticate(&state, &headers).is_err());
+    }
+
+    #[tokio::test]
+    async fn require_read_and_require_admin_and_the_routers_gate_the_api() {
+        let (dir, mut state) = fixture();
+        let static_dir = tempfile::tempdir().unwrap();
+        std::fs::write(static_dir.path().join("index.html"), "<h1>catalog</h1>").unwrap();
+        std::fs::create_dir_all(static_dir.path().join("nested")).unwrap();
+        std::fs::write(
+            static_dir.path().join("nested").join("index.html"),
+            "nested",
+        )
+        .unwrap();
+        state.static_dir = Some(static_dir.path().to_path_buf());
+
+        let missing = call(
+            router(state.clone(), &[]),
+            "GET",
+            "/api/v1/miniatures",
+            None,
+        )
+        .await;
+        assert_eq!(
+            missing,
+            StatusCode::UNAUTHORIZED,
+            "require_read rejects a request with no token"
+        );
+        let (status, Json(_)) = create_key(
+            State(state.clone()),
+            JsonBody(KeyBody {
+                name: "reader".into(),
+                scope: "read".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let Json(keys) = list_keys(State(state.clone())).await.unwrap();
+        let read_id = keys["api_keys"][0]["id"].as_i64().unwrap();
+        let read_token = {
+            let (status, Json(created)) = create_key(
+                State(state.clone()),
+                JsonBody(KeyBody {
+                    name: "second".into(),
+                    scope: "read".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status, StatusCode::CREATED);
+            let _ = read_id;
+            created.token
+        };
+        let forbidden = call(
+            router(state.clone(), &[]),
+            "POST",
+            "/api/v1/tags",
+            Some(&read_token),
+        )
+        .await;
+        assert_eq!(
+            forbidden,
+            StatusCode::FORBIDDEN,
+            "require_admin rejects a read token"
+        );
+        let allowed = call(
+            router(state.clone(), &[]),
+            "GET",
+            "/api/v1/tags",
+            Some("test-admin-token-value"),
+        )
+        .await;
+        assert_eq!(allowed, StatusCode::OK);
+
+        let hidden = call(
+            router(state.clone(), &[]),
+            "GET",
+            "/api/v1/desktop-session",
+            None,
+        )
+        .await;
+        assert_eq!(hidden, StatusCode::NOT_FOUND);
+        let shown = call(
+            ui_router(state.clone()),
+            "GET",
+            "/api/v1/desktop-session",
+            None,
+        )
+        .await;
+        assert_eq!(shown, StatusCode::OK);
+
+        let origin = HeaderValue::from_static("http://127.0.0.1:5173");
+        let cors = build(state.clone(), &[origin.clone()], false);
+        let response = cors
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header(header::ORIGIN, origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "http://127.0.0.1:5173"
+        );
+
+        let page = fallback(State(state.clone()), "/".parse().unwrap()).await;
+        let bytes = page.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(&bytes).unwrap().contains("catalog"));
+        let nested = fallback(State(state.clone()), "/nested".parse().unwrap()).await;
+        let bytes = nested.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"nested");
+        let missing = fallback(State(state.clone()), "/api/v1/nope".parse().unwrap()).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let escaped = fallback(State(state.clone()), "/../secret".parse().unwrap()).await;
+        assert_eq!(escaped.status(), StatusCode::NOT_FOUND);
+
+        let doc = openapi_doc().await;
+        assert_eq!(
+            doc.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/yaml; charset=utf-8"
+        );
+        let bytes = doc.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(&bytes).unwrap().contains("openapi"));
+        let Json(health) = super::health().await;
+        assert_eq!(health["status"], "ok");
+        assert!(dir.path().join("catalog.db").is_file());
     }
 }

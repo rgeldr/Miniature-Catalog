@@ -704,6 +704,80 @@ mod tests {
     }
 
     #[test]
+    fn criteria_and_case_folding_decide_whether_a_miniature_can_fill_a_need() {
+        let named: Need = Need {
+            label: "named".into(),
+            name: Some(" wiz ".into()),
+            races: vec![" ".into()],
+            roles: vec![],
+            combat: vec![],
+            tags: vec![],
+            size: Some("32MM".into()),
+            game: Some("descent".into()),
+            quantity: 1,
+        };
+        assert!(need_has_criteria(&named));
+        assert!(words("Orc-Warrior 2").iter().eq([
+            "orc".to_string(),
+            "warrior".to_string(),
+            "2".to_string()
+        ]
+        .iter()));
+        assert!(blank(&[String::new(), " ".into()]));
+        assert!(!blank(&["orc".into()]));
+        assert!(eq_ignore("32mm", Some(" 32MM ")));
+        assert!(eq_ignore("32mm", None));
+        assert!(eq_ignore("32mm", Some(" ")));
+        assert!(!eq_ignore("32mm", Some("15mm")));
+        assert!(eq_ignore_opt(Some("Descent"), Some("descent")));
+        assert!(eq_ignore_opt(None, None));
+        assert!(!eq_ignore_opt(None, Some("Descent")));
+        assert!(facet_matches(
+            &["Orc".into(), "Elf".into()],
+            &[" elf ".into()]
+        ));
+        assert!(facet_matches(&["Orc".into()], &[" ".into()]));
+        assert!(!facet_matches(&["Orc".into()], &["goblin".into()]));
+
+        let stock: Vec<StockMini> = vec![mini(
+            7,
+            "Human Wizard",
+            2,
+            "32mm",
+            Some("Descent"),
+            3,
+            "Office > Shelf",
+            &["human"],
+            &["wizard"],
+            &["magic"],
+        )];
+        let list: PrepList = build_prep_list(&stock, &[named]);
+        let group: &LocationGroup = &list.groups[0];
+        assert_eq!(group.location_path, "Office > Shelf");
+        let pick: &Pick = &group.picks[0];
+        assert_eq!(pick.name, "Human Wizard");
+        assert_eq!(pick.quantity, 1);
+        let result: &RequestResult = &list.requests[0];
+        assert_eq!(result.allocated, 1);
+        assert_eq!(result.short, 0);
+        let shortages: Vec<Shortage> = list.shortages();
+        assert!(shortages.is_empty());
+
+        let empty = Need {
+            label: String::new(),
+            name: None,
+            races: vec![],
+            roles: vec![],
+            combat: vec![],
+            tags: vec![],
+            size: None,
+            game: None,
+            quantity: 1,
+        };
+        assert!(!need_has_criteria(&empty));
+    }
+
+    #[test]
     fn empty_need_list_returns_no_groups_and_no_shortages() {
         let stock = vec![mini(
             1,
